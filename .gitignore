@@ -1,0 +1,14 @@
+# SQLite database files
+*.db
+*.db-shm
+*.db-wal
+
+# folder I keep for notes that are not worthy versioning
+.local
+
+# Built binaries
+/server
+/bin/
+
+# Per-session local machine workspaces
+/workspaces/
