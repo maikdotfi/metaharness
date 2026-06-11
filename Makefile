@@ -17,4 +17,4 @@ migrate-down:
 	goose -dir sql/migrations sqlite3 "$(DB_PATH)" down
 
 run: generate
-	go run ./cmd/server
+	go run . serve

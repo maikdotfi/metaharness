@@ -7,7 +7,6 @@
 .local
 
 # Built binaries
-/server
 /bin/
 
 # Per-session local machine workspaces
