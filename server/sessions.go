@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -96,6 +97,7 @@ func (h *sessionHandlers) Create(ctx context.Context, input *CreateSessionInput)
 
 	status, errText, finalText := "done", "", result.FinalText
 	if runErr != nil {
+		slog.Error("failed to run agent session", "session", session.ID, "err", runErr)
 		status, errText, finalText = "error", runErr.Error(), ""
 	}
 	finished, err := h.queries.FinishSession(ctx, gendb.FinishSessionParams{
@@ -139,12 +141,14 @@ func (h *sessionHandlers) ListEvents(ctx context.Context, input *GetSessionInput
 // request, since the run itself already happened.
 func (h *sessionHandlers) persistTranscript(ctx context.Context, sessionID int64, transcript []TranscriptMessage) {
 	for i, msg := range transcript {
-		_, _ = h.queries.AppendSessionEvent(ctx, gendb.AppendSessionEventParams{
+		if _, err := h.queries.AppendSessionEvent(ctx, gendb.AppendSessionEventParams{
 			SessionID: sessionID,
 			Seq:       int64(i),
 			Role:      msg.Role,
 			Message:   string(msg.JSON),
-		})
+		}); err != nil {
+			slog.Error("failed to persist session event", "session", sessionID, "seq", i, "err", err)
+		}
 	}
 }
 

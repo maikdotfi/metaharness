@@ -11,6 +11,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"time"
 
 	"charm.land/fantasy"
 )
@@ -31,6 +33,17 @@ func runAgent(ctx context.Context, cfg AgentConfig, systemPrompt, prompt string,
 		return RunResult{}, fmt.Errorf("language model %q: %w", modelID, err)
 	}
 
+	slog.Info("agent run starting", "provider", providerName(cfg), "model", modelID)
+	slog.Debug("agent setup", "tools", toolNames(tools), "max_steps", maxSteps)
+	slog.Debug("system prompt", "text", systemPrompt)
+	slog.Debug("user prompt", "text", prompt)
+
+	// Wrap every tool so each call's raw input and result are visible live at
+	// debug level while the loop runs.
+	for i := range tools {
+		tools[i] = withToolLogging(tools[i])
+	}
+
 	agent := fantasy.NewAgent(
 		model,
 		fantasy.WithSystemPrompt(systemPrompt),
@@ -38,15 +51,47 @@ func runAgent(ctx context.Context, cfg AgentConfig, systemPrompt, prompt string,
 		fantasy.WithStopConditions(fantasy.StepCountIs(maxSteps)),
 	)
 
+	start := time.Now()
 	res, err := agent.Generate(ctx, fantasy.AgentCall{Prompt: prompt})
 	if err != nil {
+		slog.Error("failed to generate agent response", "model", modelID, "duration", time.Since(start), "err", err)
 		return RunResult{}, fmt.Errorf("agent generate: %w", err)
 	}
+
+	logSteps(res)
+	slog.Info("agent run finished", "model", modelID, "steps", len(res.Steps), "duration", time.Since(start))
 
 	return RunResult{
 		FinalText:  res.Response.Content.Text(),
 		Transcript: buildTranscript(prompt, res),
 	}, nil
+}
+
+// logSteps dumps every message of every step raw at debug level, so a debug run
+// shows the exact serialized exchange that produced the result.
+func logSteps(res *fantasy.AgentResult) {
+	if !slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		return
+	}
+	for i, step := range res.Steps {
+		for _, msg := range step.Messages {
+			raw, err := json.Marshal(msg)
+			if err != nil {
+				slog.Error("failed to marshal step message for logging", "step", i+1, "role", msg.Role, "err", err)
+				continue
+			}
+			slog.Debug("step message", "step", i+1, "role", msg.Role, "message", string(raw))
+		}
+	}
+	slog.Debug("final text", "text", res.Response.Content.Text())
+}
+
+func toolNames(tools []tool) []string {
+	names := make([]string, 0, len(tools))
+	for _, t := range tools {
+		names = append(names, t.Info().Name)
+	}
+	return names
 }
 
 // buildTranscript reconstructs the full message log from an agent result: the
@@ -64,6 +109,7 @@ func buildTranscript(prompt string, res *fantasy.AgentResult) []TranscriptMessag
 		if err != nil {
 			// Skip a message we can't serialize rather than failing the run; the
 			// work already happened and the rest of the transcript stands.
+			slog.Error("failed to marshal transcript message", "role", msg.Role, "err", err)
 			continue
 		}
 		transcript = append(transcript, TranscriptMessage{

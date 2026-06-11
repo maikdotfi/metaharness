@@ -10,7 +10,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	"charm.land/fantasy"
 
@@ -21,6 +23,29 @@ import (
 // tool type: agents and the runner build and pass `tool`s without naming the
 // library directly.
 type tool = fantasy.AgentTool
+
+// loggedTool wraps any tool so every call is visible at debug level as it
+// happens: the raw input the model produced and the raw content the tool
+// returned. The runner wraps every tool with this, so bash, Skill and MCP tools
+// are all instrumented uniformly.
+type loggedTool struct {
+	tool
+}
+
+func withToolLogging(t tool) tool { return &loggedTool{tool: t} }
+
+func (t *loggedTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+	name := t.Info().Name
+	slog.Debug("tool call", "tool", name, "id", call.ID, "input", call.Input)
+	start := time.Now()
+	resp, err := t.tool.Run(ctx, call)
+	if err != nil {
+		slog.Error("failed to run tool", "tool", name, "id", call.ID, "duration", time.Since(start), "err", err)
+		return resp, err
+	}
+	slog.Debug("tool result", "tool", name, "id", call.ID, "duration", time.Since(start), "is_error", resp.IsError, "content", resp.Content)
+	return resp, nil
+}
 
 // bashInput is the bash tool's argument schema; the library derives the tool's
 // JSON schema from these struct tags.
@@ -69,8 +94,10 @@ func skillTool(available []skillpkg.Skill) tool {
 			name := strings.TrimSpace(in.Skill)
 			s, ok := byName[name]
 			if !ok {
+				slog.Debug("unknown skill requested", "skill", name)
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("unknown skill %q; available skills:\n%s", name, skillCatalogList(available))), nil
 			}
+			slog.Debug("skill loaded", "skill", s.Name, "args", in.Args, "instructions_bytes", len(s.Instructions))
 
 			var out strings.Builder
 			fmt.Fprintf(&out, "<%s>\n", s.Name)
@@ -136,6 +163,11 @@ func mcpTools(ctx context.Context, specs []MCPServerSpec) ([]tool, func(), error
 			cleanup()
 			return nil, nil, fmt.Errorf("mcp %q list tools: %w", spec.Command, err)
 		}
+		names := make([]string, 0, len(advertised))
+		for _, t := range advertised {
+			names = append(names, t.Name)
+		}
+		slog.Debug("mcp tools advertised", "server", spec.Command, "tools", names)
 		tools = append(tools, mcpServerTools(server, advertised)...)
 	}
 	return tools, cleanup, nil

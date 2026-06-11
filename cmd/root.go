@@ -28,6 +28,7 @@ func newRootCmd() *cobra.Command {
 
 // Execute runs the root command, exiting non-zero on error. main calls this.
 func Execute() {
+	setupLogging()
 	if err := newRootCmd().Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

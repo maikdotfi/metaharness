@@ -3,7 +3,7 @@ package server
 import (
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -76,7 +76,7 @@ func runServer(addr string, agentKind AgentKind, agentCfg AgentConfig) error {
 	api := humago.New(router, huma.DefaultConfig("Meta Harness API", "0.1.0"))
 	registerRoutes(api, queries, agent)
 
-	log.Printf("listening on %s (docs at http://localhost%s/docs)", addr, addr)
+	slog.Info("listening", "addr", addr, "docs", fmt.Sprintf("http://localhost%s/docs", addr))
 	if err := http.ListenAndServe(addr, router); err != nil {
 		return fmt.Errorf("http server: %w", err)
 	}

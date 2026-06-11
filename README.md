@@ -42,3 +42,20 @@ API docs at http://localhost:8080/docs (spec at `/openapi.json`).
 
 Dev loop: add a migration → add a query → `make generate` → wire a Huma handler.
 
+## Logging
+
+Structured logging via `log/slog`, text format on stderr. The level comes from
+the `METAHARNESS_LOG_LEVEL` environment variable (`debug` | `info` | `warn` |
+`error`); the default `info` is pretty silent — one line when an agent run
+starts and finishes.
+
+`debug` shows the raw mechanics of an agent run: the system and user prompts,
+every tool call with the exact input the model produced and the exact content
+returned (bash, Skill and MCP tools alike), skill loads, raw MCP JSON-RPC
+frames, and every step message as serialized JSON.
+
+```sh
+METAHARNESS_LOG_LEVEL=debug metaharness agent --agent code-review \
+  --workdir ./demo/code-review --prompt "Review this codebase."
+```
+

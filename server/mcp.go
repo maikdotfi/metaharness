@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -53,6 +54,7 @@ type mcpServer struct {
 
 // startMCP launches the server and completes the MCP initialize handshake.
 func startMCP(ctx context.Context, spec MCPServerSpec) (*mcpServer, error) {
+	slog.Debug("starting mcp server", "command", spec.Command, "args", spec.Args)
 	cmd := exec.CommandContext(ctx, spec.Command, spec.Args...)
 	in, err := cmd.StdinPipe()
 	if err != nil {
@@ -202,6 +204,7 @@ func (s *mcpServer) request(ctx context.Context, method string, params any) (jso
 		if len(line) == 0 {
 			continue
 		}
+		slog.Debug("mcp recv", "payload", string(line))
 		var resp rpcResponse
 		if err := json.Unmarshal(line, &resp); err != nil {
 			continue // not a JSON-RPC message we recognise; ignore
@@ -229,6 +232,7 @@ func (s *mcpServer) write(msg any) error {
 	if err != nil {
 		return err
 	}
+	slog.Debug("mcp send", "payload", string(data))
 	if _, err := s.in.Write(append(data, '\n')); err != nil {
 		return fmt.Errorf("writing request: %w", err)
 	}

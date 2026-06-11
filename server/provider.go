@@ -42,6 +42,15 @@ func newProvider(cfg AgentConfig) (fantasy.Provider, error) {
 	}
 }
 
+// providerName reports the provider a config resolves to, for logging — the
+// same defaulting as newProvider.
+func providerName(cfg AgentConfig) string {
+	if cfg.Provider == "" {
+		return string(ProviderAnthropic)
+	}
+	return string(cfg.Provider)
+}
+
 // resolveModel picks the model ID to run, falling back to a per-provider default
 // when AgentConfig.Model is empty.
 func resolveModel(cfg AgentConfig) string {
