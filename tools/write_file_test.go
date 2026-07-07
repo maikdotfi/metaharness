@@ -7,34 +7,35 @@ import (
 	"testing"
 
 	"github.com/maikdotfi/metaharness/agent"
+	"github.com/maikdotfi/metaharness/testutils"
 )
 
 func TestWriteFile(t *testing.T) {
-	ec, dir := newExecCtx(t)
+	ec, dir := testutils.NewExecCtx(t)
 	path := filepath.Join(dir, "out.txt")
 	tool := agent.Adapt(WriteFile{})
 
-	res := callTool(t, ec, tool, WriteFileArgs{Path: path, Content: sampleText})
+	res := testutils.CallTool(t, ec, tool, WriteFileArgs{Path: path, Content: sampleText})
 	if res.IsError {
 		t.Fatalf("unexpected error: %q", res.Content)
 	}
 	// The base64 round-trip must preserve the tricky characters exactly.
-	if got := onDisk(t, path); got != sampleText {
+	if got := testutils.OnDisk(t, path); got != sampleText {
 		t.Errorf("file contents = %q, want %q", got, sampleText)
 	}
 }
 
 // TestWriteFileCreatesParents checks that missing parent directories are created.
 func TestWriteFileCreatesParents(t *testing.T) {
-	ec, dir := newExecCtx(t)
+	ec, dir := testutils.NewExecCtx(t)
 	path := filepath.Join(dir, "nested", "deep", "out.txt")
 	tool := agent.Adapt(WriteFile{})
 
-	res := callTool(t, ec, tool, WriteFileArgs{Path: path, Content: "hi"})
+	res := testutils.CallTool(t, ec, tool, WriteFileArgs{Path: path, Content: "hi"})
 	if res.IsError {
 		t.Fatalf("unexpected error: %q", res.Content)
 	}
-	if got := onDisk(t, path); got != "hi" {
+	if got := testutils.OnDisk(t, path); got != "hi" {
 		t.Errorf("file contents = %q, want %q", got, "hi")
 	}
 }
@@ -42,15 +43,15 @@ func TestWriteFileCreatesParents(t *testing.T) {
 // TestWriteFileOverwrites checks that writing replaces existing content wholesale
 // rather than appending — including truncating a longer prior file.
 func TestWriteFileOverwrites(t *testing.T) {
-	ec, dir := newExecCtx(t)
-	path := seed(t, dir, "out.txt", "the old content, which is quite a bit longer")
+	ec, dir := testutils.NewExecCtx(t)
+	path := testutils.Seed(t, dir, "out.txt", "the old content, which is quite a bit longer")
 	tool := agent.Adapt(WriteFile{})
 
-	res := callTool(t, ec, tool, WriteFileArgs{Path: path, Content: "new"})
+	res := testutils.CallTool(t, ec, tool, WriteFileArgs{Path: path, Content: "new"})
 	if res.IsError {
 		t.Fatalf("unexpected error: %q", res.Content)
 	}
-	if got := onDisk(t, path); got != "new" {
+	if got := testutils.OnDisk(t, path); got != "new" {
 		t.Errorf("file contents = %q, want %q", got, "new")
 	}
 }
@@ -58,15 +59,15 @@ func TestWriteFileOverwrites(t *testing.T) {
 // TestWriteFileEmpty checks that empty content produces an empty file (a common
 // edge case for the base64 pipeline), not an error.
 func TestWriteFileEmpty(t *testing.T) {
-	ec, dir := newExecCtx(t)
+	ec, dir := testutils.NewExecCtx(t)
 	path := filepath.Join(dir, "empty.txt")
 	tool := agent.Adapt(WriteFile{})
 
-	res := callTool(t, ec, tool, WriteFileArgs{Path: path, Content: ""})
+	res := testutils.CallTool(t, ec, tool, WriteFileArgs{Path: path, Content: ""})
 	if res.IsError {
 		t.Fatalf("unexpected error: %q", res.Content)
 	}
-	if got := onDisk(t, path); got != "" {
+	if got := testutils.OnDisk(t, path); got != "" {
 		t.Errorf("file contents = %q, want empty", got)
 	}
 }
@@ -74,7 +75,7 @@ func TestWriteFileEmpty(t *testing.T) {
 // TestWriteFileValidatesInput checks the adapter rejects a missing required
 // field ("content") before anything reaches the shell.
 func TestWriteFileValidatesInput(t *testing.T) {
-	ec, dir := newExecCtx(t)
+	ec, dir := testutils.NewExecCtx(t)
 	tool := agent.Adapt(WriteFile{})
 
 	input, _ := json.Marshal(map[string]string{"path": filepath.Join(dir, "x.txt")})

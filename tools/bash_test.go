@@ -3,27 +3,11 @@ package tools
 import (
 	"context"
 	"encoding/json"
-	"os/exec"
 	"testing"
 
 	"github.com/maikdotfi/metaharness/agent"
+	"github.com/maikdotfi/metaharness/testutils"
 )
-
-// realSandbox runs commands for real via os/exec, so the test exercises the
-// actual shell rather than a mock. The Bash tool invokes "bash -c <cmd>".
-type realSandbox struct{}
-
-func (realSandbox) Exec(ctx context.Context, cmd agent.Command) (agent.ExecResult, error) {
-	c := exec.CommandContext(ctx, cmd.Cmd, cmd.Args...)
-	out, err := c.Output()
-	res := agent.ExecResult{Stdout: string(out), ExitCode: c.ProcessState.ExitCode()}
-	if ee, ok := err.(*exec.ExitError); ok {
-		res.Stderr = string(ee.Stderr)
-	}
-	return res, nil
-}
-
-func (realSandbox) Close() error { return nil }
 
 func TestBashExecute(t *testing.T) {
 	tests := []struct {
@@ -43,15 +27,11 @@ func TestBashExecute(t *testing.T) {
 	// Drive the tool through Adapt so the test exercises the real path:
 	// schema validation, JSON decode, then execution against a real shell.
 	tool := agent.Adapt(Bash{})
-	ec := &agent.ExecCtx{Sandbox: realSandbox{}}
+	ec := &agent.ExecCtx{Sandbox: testutils.RealSandbox{}}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			input, _ := json.Marshal(map[string]string{"cmd": tt.cmd})
-			res, err := tool.Execute(context.Background(), ec, input)
-			if err != nil {
-				t.Fatalf("unexpected infra error: %v", err)
-			}
+			res := testutils.CallTool(t, ec, tool, map[string]string{"cmd": tt.cmd})
 			if res.IsError != tt.isError {
 				t.Errorf("IsError = %v, want %v (content: %q)", res.IsError, tt.isError, res.Content)
 			}
@@ -67,7 +47,7 @@ func TestBashExecute(t *testing.T) {
 // before anything reaches the shell.
 func TestBashValidatesInput(t *testing.T) {
 	tool := agent.Adapt(Bash{})
-	ec := &agent.ExecCtx{Sandbox: realSandbox{}}
+	ec := &agent.ExecCtx{Sandbox: testutils.RealSandbox{}}
 
 	res, err := tool.Execute(context.Background(), ec, json.RawMessage(`{}`))
 	if err != nil {
@@ -90,7 +70,7 @@ func TestAdaptFunc(t *testing.T) {
 			return agent.ToolResult{Content: args.Msg}, nil
 		},
 	)
-	ec := &agent.ExecCtx{Sandbox: realSandbox{}}
+	ec := &agent.ExecCtx{Sandbox: testutils.RealSandbox{}}
 
 	res, err := echo.Execute(context.Background(), ec, json.RawMessage(`{"msg":"hi"}`))
 	if err != nil {

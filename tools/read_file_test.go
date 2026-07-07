@@ -10,14 +10,15 @@ import (
 	"unicode/utf8"
 
 	"github.com/maikdotfi/metaharness/agent"
+	"github.com/maikdotfi/metaharness/testutils"
 )
 
 func TestReadFile(t *testing.T) {
-	ec, dir := newExecCtx(t)
-	path := seed(t, dir, "hello.txt", sampleText)
+	ec, dir := testutils.NewExecCtx(t)
+	path := testutils.Seed(t, dir, "hello.txt", sampleText)
 	tool := agent.Adapt(ReadFile{})
 
-	res := callTool(t, ec, tool, ReadFileArgs{Path: path})
+	res := testutils.CallTool(t, ec, tool, ReadFileArgs{Path: path})
 	if res.IsError {
 		t.Fatalf("unexpected error: %q", res.Content)
 	}
@@ -37,15 +38,15 @@ func TestReadFile(t *testing.T) {
 // checks both that only that range is returned and that the model is told how
 // much it hasn't seen.
 func TestReadFileOffsetLimit(t *testing.T) {
-	ec, dir := newExecCtx(t)
+	ec, dir := testutils.NewExecCtx(t)
 	var sb strings.Builder
 	for i := 1; i <= 10; i++ {
 		fmt.Fprintf(&sb, "line %d\n", i)
 	}
-	path := seed(t, dir, "ten.txt", sb.String())
+	path := testutils.Seed(t, dir, "ten.txt", sb.String())
 	tool := agent.Adapt(ReadFile{})
 
-	res := callTool(t, ec, tool, ReadFileArgs{Path: path, Offset: 3, Limit: 2})
+	res := testutils.CallTool(t, ec, tool, ReadFileArgs{Path: path, Offset: 3, Limit: 2})
 	if res.IsError {
 		t.Fatalf("unexpected error: %q", res.Content)
 	}
@@ -61,15 +62,15 @@ func TestReadFileOffsetLimit(t *testing.T) {
 // defaultReadLimit lines returns only the first window plus a note, so a huge
 // file can't flood the context.
 func TestReadFileTruncatesLongFiles(t *testing.T) {
-	ec, dir := newExecCtx(t)
+	ec, dir := testutils.NewExecCtx(t)
 	var sb strings.Builder
 	for i := 1; i <= defaultReadLimit+500; i++ {
 		fmt.Fprintf(&sb, "line %d\n", i)
 	}
-	path := seed(t, dir, "big.txt", sb.String())
+	path := testutils.Seed(t, dir, "big.txt", sb.String())
 	tool := agent.Adapt(ReadFile{})
 
-	res := callTool(t, ec, tool, ReadFileArgs{Path: path})
+	res := testutils.CallTool(t, ec, tool, ReadFileArgs{Path: path})
 	if res.IsError {
 		t.Fatalf("unexpected error: %q", res.Content)
 	}
@@ -89,12 +90,12 @@ func TestReadFileTruncatesLongFiles(t *testing.T) {
 // the output and the read reports that it happened, so the model doesn't treat
 // the shown line as complete.
 func TestReadFileClipsLongLines(t *testing.T) {
-	ec, dir := newExecCtx(t)
+	ec, dir := testutils.NewExecCtx(t)
 	content := "short line\n" + strings.Repeat("x", maxLineLen+100) + "\n"
-	path := seed(t, dir, "wide.txt", content)
+	path := testutils.Seed(t, dir, "wide.txt", content)
 	tool := agent.Adapt(ReadFile{})
 
-	res := callTool(t, ec, tool, ReadFileArgs{Path: path})
+	res := testutils.CallTool(t, ec, tool, ReadFileArgs{Path: path})
 	if res.IsError {
 		t.Fatalf("unexpected error: %q", res.Content)
 	}
@@ -113,11 +114,11 @@ func TestReadFileClipsLongLines(t *testing.T) {
 // TestReadFileEmpty checks an empty file reports itself as empty rather than
 // returning a blank result.
 func TestReadFileEmpty(t *testing.T) {
-	ec, dir := newExecCtx(t)
-	path := seed(t, dir, "empty.txt", "")
+	ec, dir := testutils.NewExecCtx(t)
+	path := testutils.Seed(t, dir, "empty.txt", "")
 	tool := agent.Adapt(ReadFile{})
 
-	res := callTool(t, ec, tool, ReadFileArgs{Path: path})
+	res := testutils.CallTool(t, ec, tool, ReadFileArgs{Path: path})
 	if res.IsError {
 		t.Fatalf("unexpected error: %q", res.Content)
 	}
@@ -129,11 +130,11 @@ func TestReadFileEmpty(t *testing.T) {
 // TestReadFileOffsetPastEnd checks an offset beyond the last line reports the
 // bound instead of silently returning nothing.
 func TestReadFileOffsetPastEnd(t *testing.T) {
-	ec, dir := newExecCtx(t)
-	path := seed(t, dir, "hello.txt", sampleText)
+	ec, dir := testutils.NewExecCtx(t)
+	path := testutils.Seed(t, dir, "hello.txt", sampleText)
 	tool := agent.Adapt(ReadFile{})
 
-	res := callTool(t, ec, tool, ReadFileArgs{Path: path, Offset: 99})
+	res := testutils.CallTool(t, ec, tool, ReadFileArgs{Path: path, Offset: 99})
 	if res.IsError {
 		t.Fatalf("unexpected error: %q", res.Content)
 	}
@@ -218,10 +219,10 @@ func TestClipLine(t *testing.T) {
 }
 
 func TestReadFileMissing(t *testing.T) {
-	ec, dir := newExecCtx(t)
+	ec, dir := testutils.NewExecCtx(t)
 	tool := agent.Adapt(ReadFile{})
 
-	res := callTool(t, ec, tool, ReadFileArgs{Path: filepath.Join(dir, "does-not-exist.txt")})
+	res := testutils.CallTool(t, ec, tool, ReadFileArgs{Path: filepath.Join(dir, "does-not-exist.txt")})
 	if !res.IsError {
 		t.Fatalf("expected error for missing file, got success: %q", res.Content)
 	}
@@ -230,7 +231,7 @@ func TestReadFileMissing(t *testing.T) {
 // TestReadFileValidatesInput checks the adapter rejects a missing required
 // "path" before anything reaches the shell.
 func TestReadFileValidatesInput(t *testing.T) {
-	ec, _ := newExecCtx(t)
+	ec, _ := testutils.NewExecCtx(t)
 	tool := agent.Adapt(ReadFile{})
 
 	res, err := tool.Execute(context.Background(), ec, json.RawMessage(`{}`))

@@ -16,7 +16,7 @@ import (
 
 // shellQuote wraps s in single quotes so it can be embedded verbatim in a bash
 // command line, whatever characters it contains. A literal single quote is
-// closed, escaped, and reopened ('\'') — the standard POSIX trick.
+// closed, escaped, and reopened ('\”) — the standard POSIX trick.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
