@@ -6,3 +6,5 @@ It is not meant to be useful without some coding, you have to write the agent it
 
 Meta harness is not executable by itself, see [examples](./examples) for how to assemble agents with it.
 
+See [STACK.md](./STACK.md) for the tech stack and [TOOLS.md](./TOOLS.md) for how tools are written and why the tool plumbing is shaped the way it is.
+
