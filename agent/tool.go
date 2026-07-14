@@ -12,7 +12,7 @@ type ToolResult struct {
 	IsError bool
 }
 
-// ExecCtx is what a tool gets at call time. Sandbox is injected here by Run.
+// ExecCtx is what a tool gets at call time
 type ExecCtx struct {
 	Session *Session
 	Sandbox Sandbox

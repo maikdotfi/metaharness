@@ -182,6 +182,84 @@ stream (see the note in `run.go`) and we target frontier models whose tool-call
 JSON is already well-formed, so decoding plus validation is enough. If either of
 those assumptions changes, the same package has the pieces to drop in.
 
+## The full flow, traced through one real call
+
+`TestSkill` in `tools/skill_test.go` drives the real `skill` tool through every
+layer described above, so it makes a good concrete trace. The test plays the two
+roles the agent loop normally plays: it marshals typed args to raw JSON bytes
+(the model's job) and calls `Execute` on the erased `Tool` (the dispatcher's
+job) — that's what `testutils.CallTool` does. Everything between those two
+points is exactly what happens in production.
+
+The key thing to see is *where the raw JSON stops*. The test/dispatcher side
+only ever speaks JSON; the tool author's handler only ever sees a typed
+`SkillArgs`. `agent/adapt.go` is the one place the conversion happens:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    box JSON world — dispatcher side
+        participant Test as TestSkill<br/>(plays model + dispatcher)
+    end
+    box The bridge — agent/adapt.go
+        participant Adapter as typedAdapter[SkillArgs]<br/>(the erased agent.Tool)
+        participant Typed as funcTool[SkillArgs]<br/>(the TypedTool)
+    end
+    box Typed world — tool author side
+        participant Handler as skill handler closure<br/>tools/skill.go
+    end
+
+    rect rgba(128, 128, 128, 0.1)
+        note over Test,Handler: Build time — NewSkill(pirate)
+        Test->>Handler: NewSkill(pirate) builds the catalog + typed handler
+        Handler->>Typed: AdaptFunc(meta, fn) wraps fn as a TypedTool[SkillArgs]
+        Typed->>Adapter: Adapt(...) derives the JSON Schema from SkillArgs by reflection
+        Adapter-->>Test: returns a plain agent.Tool — SkillArgs now hidden inside
+    end
+
+    rect rgba(128, 128, 128, 0.1)
+        note over Test,Typed: Definition — what the model is told
+        Test->>Adapter: tool.Definition()
+        Adapter->>Typed: Meta()
+        Typed-->>Adapter: name "skill", description incl. the available_skills catalog
+        Adapter-->>Test: ToolDefinition{Name, Description, Schema derived from SkillArgs}
+    end
+
+    rect rgba(128, 128, 128, 0.1)
+        note over Test,Handler: Execute — testutils.CallTool
+        Test->>Test: json.Marshal(SkillArgs{...}) → raw JSON bytes<br/>(what the model would produce)
+        Test->>Adapter: Execute(ctx, ec, json.RawMessage)
+        Adapter->>Adapter: decode into any
+        Adapter->>Adapter: validate against the derived schema<br/>(bad input → IsError result, handler never runs)
+        Adapter->>Adapter: decode into SkillArgs
+        Adapter->>Typed: Execute(ctx, ec, args SkillArgs) — typed, no JSON
+        Typed->>Handler: fn(ctx, ec, args)
+        Handler->>Handler: look up args.Name in the catalog,<br/>wrap instructions + args in a skill_content block
+        Handler-->>Typed: ToolResult{Content: skill_content block}
+        Typed-->>Adapter: ToolResult
+        Adapter-->>Test: ToolResult passes through unchanged
+    end
+```
+
+Reading the test against the diagram:
+
+- `NewSkill(pirate)` (`tools/skill.go`) is the whole build-time phase: it
+  captures the catalog in a closure and hands the typed handler to `AdaptFunc`,
+  which wraps it in `funcTool[SkillArgs]` and then `Adapt` wraps *that* in
+  `typedAdapter[SkillArgs]`. What comes back is an erased `agent.Tool`.
+- The test's first assertion (`tool.Definition()` contains the
+  `<available_skills>` catalog) exercises the definition path: the adapter
+  merges the tool's `Meta()` with the schema it generated from `SkillArgs`.
+- `testutils.CallTool(t, ec, tool, SkillArgs{...})` exercises the execute path:
+  marshal to JSON, then the adapter's validate → decode → typed call. The
+  second assertion (the `<skill_content>` block) checks what the handler
+  produced, which the adapter returned untouched.
+
+Note the two generic layers in the bridge are an `AdaptFunc` detail: a tool
+that implements `TypedTool` directly (like `tools.Bash`) skips `funcTool` and
+sits where the handler closure sits — the adapter calls its typed `Execute`
+straight away. The JSON boundary is identical either way.
+
 ## Writing a new tool
 
 There are two ways to author one. Both are typed, both derive the schema from
