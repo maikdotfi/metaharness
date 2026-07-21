@@ -28,7 +28,10 @@ func Adapt[T any](inner TypedTool[T]) Tool {
 // implementation instead when the tool carries dependencies or you want a named
 // type to reference and test. This mirrors the http.Handler / http.HandlerFunc
 // pairing in the standard library.
-func AdaptFunc[T any](meta ToolMeta, fn func(ctx context.Context, ec *ExecCtx, args T) (ToolResult, error)) Tool {
+func AdaptFunc[T any](
+	meta ToolMeta,
+	fn func(ctx context.Context, ec *ExecCtx, args T) (ToolResult, error),
+) Tool {
 	return Adapt(funcTool[T]{meta: meta, fn: fn})
 }
 
@@ -39,7 +42,11 @@ type funcTool[T any] struct {
 
 func (f funcTool[T]) Meta() ToolMeta { return f.meta }
 
-func (f funcTool[T]) Execute(ctx context.Context, ec *ExecCtx, args T) (ToolResult, error) {
+func (f funcTool[T]) Execute(
+	ctx context.Context,
+	ec *ExecCtx,
+	args T,
+) (ToolResult, error) {
 	return f.fn(ctx, ec, args)
 }
 
@@ -57,21 +64,34 @@ func (a *typedAdapter[T]) Definition() model.ToolDefinition {
 	}
 }
 
-func (a *typedAdapter[T]) Execute(ctx context.Context, ec *ExecCtx, input json.RawMessage) (ToolResult, error) {
+func (a *typedAdapter[T]) Execute(
+	ctx context.Context,
+	ec *ExecCtx,
+	input json.RawMessage,
+) (ToolResult, error) {
 	// Validate against the schema first so missing required fields, bad enums,
 	// and out-of-range numbers become a clear message fed back to the model
 	// rather than silent Go zero values.
 	var obj any
 	if err := json.Unmarshal(input, &obj); err != nil {
-		return ToolResult{Content: "invalid arguments: " + err.Error(), IsError: true}, nil
+		return ToolResult{
+			Content: "invalid arguments: " + err.Error(),
+			IsError: true,
+		}, nil
 	}
 	if err := schema.ValidateAgainstSchema(obj, a.schema); err != nil {
-		return ToolResult{Content: "invalid arguments: " + err.Error(), IsError: true}, nil
+		return ToolResult{
+			Content: "invalid arguments: " + err.Error(),
+			IsError: true,
+		}, nil
 	}
 
 	var args T
 	if err := json.Unmarshal(input, &args); err != nil {
-		return ToolResult{Content: "invalid arguments: " + err.Error(), IsError: true}, nil
+		return ToolResult{
+			Content: "invalid arguments: " + err.Error(),
+			IsError: true,
+		}, nil
 	}
 	return a.inner.Execute(ctx, ec, args)
 }

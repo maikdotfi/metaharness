@@ -65,7 +65,9 @@ func TestSkillGrugReview(t *testing.T) {
     <description>` + grug.Description + `</description>
   </skill>
 </available_skills>`
+
 	def := tool.Definition()
+
 	if !strings.Contains(def.Description, wantCatalog) {
 		t.Errorf("tool description missing catalog block %q, got %q", wantCatalog, def.Description)
 	}
@@ -77,6 +79,7 @@ func TestSkillGrugReview(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("unexpected error: %q", res.Content)
 	}
+
 	want := `<skill_content name="grug-review">
 ` + strings.TrimRight(grug.Instructions, "\n") + `
 
