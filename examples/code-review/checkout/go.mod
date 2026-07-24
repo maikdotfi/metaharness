@@ -1,3 +1,3 @@
-module example.com/metaharness-demo-review
+module example.com/checkout
 
 go 1.26.4

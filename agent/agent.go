@@ -25,7 +25,11 @@ func WithTools(ts ...Tool) Option {
 }
 
 func New(systemPrompt string, opts ...Option) *Agent {
-	a := &Agent{SystemPrompt: systemPrompt, Tools: map[string]Tool{}}
+	a := &Agent{
+		SystemPrompt: systemPrompt,
+		Tools:        map[string]Tool{},
+		Store:        DiscardStore{},
+	}
 	for _, o := range opts {
 		o(a)
 	}
