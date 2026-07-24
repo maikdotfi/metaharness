@@ -35,22 +35,28 @@ func main() {
 	modelID := flag.String("model", "gemma4:31b-cloud", "Anthropic model id")
 	workdir := flag.String("workdir", "checkout", "directory the agent's tools run in")
 	prompt := flag.String("prompt", defaultPrompt, "user prompt to start the review with")
+	think := flag.Bool("think", false, "enable extended thinking output")
+	effort := flag.String("effort", "medium", "thinking effort level (low, medium, high, xhigh, max); only used with -think")
 	flag.Parse()
 
 	if os.Getenv("ANTHROPIC_API_KEY") == "" {
 		log.Fatal("ANTHROPIC_API_KEY is not set")
 	}
-	if err := run(context.Background(), *modelID, *workdir, *prompt); err != nil {
+	if err := run(context.Background(), *modelID, *workdir, *prompt, *think, *effort); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(ctx context.Context, modelID, workdir, prompt string) error {
-	m, err := model.New(model.Config{
+func run(ctx context.Context, modelID, workdir, prompt string, think bool, effort string) error {
+	cfg := model.Config{
 		Provider: model.ProviderAnthropic,
 		APIKey:   os.Getenv("ANTHROPIC_API_KEY"),
 		BaseURL:  os.Getenv("ANTHROPIC_API_URL"),
-	})
+	}
+	if think {
+		cfg.Thinking = &model.Thinking{Effort: model.Effort(effort)}
+	}
+	m, err := model.New(cfg)
 	if err != nil {
 		return err
 	}
@@ -97,6 +103,11 @@ func run(ctx context.Context, modelID, workdir, prompt string) error {
 }
 
 func printAssistant(m *model.Message) {
+	for _, reasoning := range model.ReasoningParts(m) {
+		if reasoning.Text != "" {
+			fmt.Printf("\n💭 %s\n", reasoning.Text)
+		}
+	}
 	for _, text := range model.TextParts(m) {
 		if text.Text != "" {
 			fmt.Printf("\n%s\n", text.Text)

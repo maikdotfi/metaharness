@@ -29,6 +29,9 @@ type Config struct {
 	APIKey   string
 	BaseURL  string
 	Headers  map[string]string
+	// Thinking, when non-nil, enables extended thinking (reasoning) output on
+	// every request. Leave it nil to keep thinking off.
+	Thinking *Thinking
 }
 
 // FantasyModel adapts a fantasy.Provider to ModelClient.
@@ -38,6 +41,11 @@ type FantasyModel struct {
 	provider fantasy.Provider
 	mu       sync.Mutex
 	cache    map[string]fantasy.LanguageModel
+
+	// thinkingOpts and minOutputTokens hold the extended-thinking settings
+	// applied to every request. thinkingOpts is nil when thinking is off.
+	thinkingOpts    fantasy.ProviderOptions
+	minOutputTokens int64
 }
 
 // New builds a ModelClient from metaharness-owned configuration. Callers do
@@ -92,7 +100,17 @@ func New(cfg Config) (ModelClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("building %s model provider: %w", providerName(cfg.Provider), err)
 	}
-	return NewFantasyModel(provider), nil
+
+	m := NewFantasyModel(provider)
+	if cfg.Thinking != nil {
+		opts, minOutput := cfg.Thinking.callOptions(cfg.Provider)
+		if opts == nil {
+			return nil, fmt.Errorf("thinking is not supported for provider %q", providerName(cfg.Provider))
+		}
+		m.thinkingOpts = opts
+		m.minOutputTokens = minOutput
+	}
+	return m, nil
 }
 
 // This is a bit hacky, but I don't really see a big issue including the API key in the
@@ -150,10 +168,19 @@ func (m *FantasyModel) Generate(ctx context.Context, req ModelRequest) (fantasy.
 	}
 	prompt = append(prompt, req.Messages...)
 
-	resp, err := lm.Generate(ctx, fantasy.Call{
+	call := fantasy.Call{
 		Prompt: fantasy.Prompt(prompt),
 		Tools:  toFantasyTools(req.Tools),
-	})
+	}
+	if m.thinkingOpts != nil {
+		call.ProviderOptions = m.thinkingOpts
+		if m.minOutputTokens > 0 {
+			maxOutput := m.minOutputTokens
+			call.MaxOutputTokens = &maxOutput
+		}
+	}
+
+	resp, err := lm.Generate(ctx, call)
 	if err != nil {
 		return fantasy.Message{}, fantasy.Usage{}, err
 	}
@@ -172,11 +199,18 @@ func toFantasyTools(defs []ToolDefinition) []fantasy.Tool {
 	return out
 }
 
-// assistantMessage rebuilds the assistant turn (text + tool calls) as a
-// fantasy.Message we can append to the transcript and replay next call.
-// Reasoning parts are dropped for simplicity.
+// assistantMessage rebuilds the assistant turn (reasoning + text + tool calls)
+// as a fantasy.Message we can append to the transcript and replay next call.
+// Reasoning parts come first and carry their provider metadata (e.g. Anthropic
+// thinking-block signatures) so a thinking model can validate them on replay.
 func assistantMessage(resp *fantasy.Response) fantasy.Message {
 	var parts []fantasy.MessagePart
+	for _, r := range resp.Content.Reasoning() {
+		parts = append(parts, fantasy.ReasoningPart{
+			Text:            r.Text,
+			ProviderOptions: fantasy.ProviderOptions(r.ProviderMetadata),
+		})
+	}
 	if t := resp.Content.Text(); t != "" {
 		parts = append(parts, fantasy.TextPart{Text: t})
 	}

@@ -34,6 +34,11 @@ type TextPart struct {
 	Text string
 }
 
+// ReasoningPart is thinking (reasoning) text emitted in a model message.
+type ReasoningPart struct {
+	Text string
+}
+
 // ToolCall is a tool invocation emitted by a model.
 type ToolCall struct {
 	ID    string
@@ -57,6 +62,21 @@ func TextParts(m *Message) []TextPart {
 	for _, part := range m.Content {
 		if text, ok := fantasy.AsMessagePart[fantasy.TextPart](part); ok {
 			parts = append(parts, TextPart{Text: text.Text})
+		}
+	}
+	return parts
+}
+
+// ReasoningParts returns the thinking (reasoning) portions of m in their
+// original order. It is empty unless the model was configured with Thinking.
+func ReasoningParts(m *Message) []ReasoningPart {
+	if m == nil {
+		return nil
+	}
+	var parts []ReasoningPart
+	for _, part := range m.Content {
+		if reasoning, ok := fantasy.AsMessagePart[fantasy.ReasoningPart](part); ok {
+			parts = append(parts, ReasoningPart{Text: reasoning.Text})
 		}
 	}
 	return parts
