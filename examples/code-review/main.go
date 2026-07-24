@@ -3,9 +3,9 @@
 // skill tool loaded with the grug-review skill, so the review comes back in
 // the grug brained developer's voice.
 //
-// Run from the repository root with ANTHROPIC_API_KEY set:
+// Run from examples/code-review with ANTHROPIC_API_KEY set:
 //
-//	go run ./examples/code-review
+//	go run .
 package main
 
 import (
@@ -15,9 +15,6 @@ import (
 	"log"
 	"os"
 	"time"
-
-	"charm.land/fantasy"
-	"charm.land/fantasy/providers/anthropic"
 
 	"github.com/maikdotfi/metaharness/agent"
 	"github.com/maikdotfi/metaharness/model"
@@ -35,8 +32,8 @@ Before writing any feedback, load the grug-review skill with the skill tool and 
 const defaultPrompt = "Review this checkout package. Inspect the code and tests, run anything useful, and return review feedback with file and line references."
 
 func main() {
-	modelID := flag.String("model", "claude-sonnet-5", "Anthropic model id")
-	workdir := flag.String("workdir", "examples/code-review/checkout", "directory the agent's tools run in")
+	modelID := flag.String("model", "gemma4:31b-cloud", "Anthropic model id")
+	workdir := flag.String("workdir", "checkout", "directory the agent's tools run in")
 	prompt := flag.String("prompt", defaultPrompt, "user prompt to start the review with")
 	flag.Parse()
 
@@ -49,13 +46,17 @@ func main() {
 }
 
 func run(ctx context.Context, modelID, workdir, prompt string) error {
-	provider, err := anthropic.New(anthropic.WithAPIKey(os.Getenv("ANTHROPIC_API_KEY")))
+	m, err := model.New(model.Config{
+		Provider: model.ProviderAnthropic,
+		APIKey:   os.Getenv("ANTHROPIC_API_KEY"),
+		BaseURL:  os.Getenv("ANTHROPIC_API_URL"),
+	})
 	if err != nil {
-		return fmt.Errorf("building anthropic provider: %w", err)
+		return err
 	}
 
 	a := agent.New(systemPrompt,
-		agent.WithModel(model.NewFantasyModel(provider)),
+		agent.WithModel(m),
 		agent.WithStore(agent.DiscardStore{}),
 		agent.WithSandbox(sandbox.LocalFactory{Root: workdir}),
 		agent.WithTools(
@@ -70,7 +71,7 @@ func run(ctx context.Context, modelID, workdir, prompt string) error {
 	sess := &agent.Session{
 		ID:       fmt.Sprintf("review-%d", time.Now().Unix()),
 		Model:    modelID,
-		Messages: []fantasy.Message{fantasy.NewUserMessage(prompt)},
+		Messages: []model.Message{model.NewUserMessage(prompt)},
 		Status:   agent.StatusActive,
 	}
 	fmt.Printf("session %s\n\n", sess.ID)
@@ -95,28 +96,23 @@ func run(ctx context.Context, modelID, workdir, prompt string) error {
 	return nil
 }
 
-func printAssistant(m *fantasy.Message) {
-	for _, p := range m.Content {
-		if t, ok := fantasy.AsMessagePart[fantasy.TextPart](p); ok && t.Text != "" {
-			fmt.Printf("\n%s\n", t.Text)
+func printAssistant(m *model.Message) {
+	for _, text := range model.TextParts(m) {
+		if text.Text != "" {
+			fmt.Printf("\n%s\n", text.Text)
 		}
-		if tc, ok := fantasy.AsMessagePart[fantasy.ToolCallPart](p); ok {
-			fmt.Printf("→ %s %s\n", tc.ToolName, clip(tc.Input, 120))
-		}
+	}
+	for _, call := range model.ToolCalls(m) {
+		fmt.Printf("→ %s %s\n", call.Name, clip(call.Input, 120))
 	}
 }
 
-func printToolResult(m *fantasy.Message) {
-	for _, p := range m.Content {
-		tr, ok := fantasy.AsMessagePart[fantasy.ToolResultPart](p)
-		if !ok {
-			continue
-		}
-		switch out := tr.Output.(type) {
-		case fantasy.ToolResultOutputContentText:
-			fmt.Printf("← %s\n", clip(out.Text, 200))
-		case fantasy.ToolResultOutputContentError:
-			fmt.Printf("← error: %v\n", out.Error)
+func printToolResult(m *model.Message) {
+	for _, result := range model.ToolResults(m) {
+		if result.Error != nil {
+			fmt.Printf("← error: %v\n", result.Error)
+		} else {
+			fmt.Printf("← %s\n", clip(result.Text, 200))
 		}
 	}
 }

@@ -2,10 +2,34 @@ package model
 
 import (
 	"context"
+	"fmt"
+	"maps"
 	"sync"
 
 	"charm.land/fantasy"
+	"charm.land/fantasy/providers/anthropic"
+	"charm.land/fantasy/providers/google"
+	"charm.land/fantasy/providers/openai"
 )
+
+// Provider identifies the model API that Config should connect to.
+type Provider string
+
+const (
+	ProviderAnthropic Provider = "anthropic"
+	ProviderOpenAI    Provider = "openai"
+	ProviderGoogle    Provider = "google"
+)
+
+// Config contains the provider-specific connection settings needed by New.
+// The model ID is selected per agent.Session, so one configured Model can serve
+// sessions using different models from the same provider.
+type Config struct {
+	Provider Provider
+	APIKey   string
+	BaseURL  string
+	Headers  map[string]string
+}
 
 // FantasyModel adapts a fantasy.Provider to ModelClient.
 // It caches one LanguageModel per model id so switching models within the
@@ -16,6 +40,86 @@ type FantasyModel struct {
 	cache    map[string]fantasy.LanguageModel
 }
 
+// New builds a ModelClient from metaharness-owned configuration. Callers do
+// not need to construct or import a fantasy provider.
+func New(cfg Config) (ModelClient, error) {
+	cfg.Headers = headersWithAuthorization(cfg.Headers, cfg.APIKey)
+
+	var (
+		provider fantasy.Provider
+		err      error
+	)
+	switch cfg.Provider {
+	case "", ProviderAnthropic:
+		opts := []anthropic.Option{}
+		if cfg.APIKey != "" {
+			opts = append(opts, anthropic.WithAPIKey(cfg.APIKey))
+		}
+		if cfg.BaseURL != "" {
+			opts = append(opts, anthropic.WithBaseURL(cfg.BaseURL))
+		}
+		if len(cfg.Headers) > 0 {
+			opts = append(opts, anthropic.WithHeaders(cfg.Headers))
+		}
+		provider, err = anthropic.New(opts...)
+	case ProviderOpenAI:
+		opts := []openai.Option{}
+		if cfg.APIKey != "" {
+			opts = append(opts, openai.WithAPIKey(cfg.APIKey))
+		}
+		if cfg.BaseURL != "" {
+			opts = append(opts, openai.WithBaseURL(cfg.BaseURL))
+		}
+		if len(cfg.Headers) > 0 {
+			opts = append(opts, openai.WithHeaders(cfg.Headers))
+		}
+		provider, err = openai.New(opts...)
+	case ProviderGoogle:
+		opts := []google.Option{}
+		if cfg.APIKey != "" {
+			opts = append(opts, google.WithGeminiAPIKey(cfg.APIKey))
+		}
+		if cfg.BaseURL != "" {
+			opts = append(opts, google.WithBaseURL(cfg.BaseURL))
+		}
+		if len(cfg.Headers) > 0 {
+			opts = append(opts, google.WithHeaders(cfg.Headers))
+		}
+		provider, err = google.New(opts...)
+	default:
+		return nil, fmt.Errorf("unknown model provider %q", cfg.Provider)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("building %s model provider: %w", providerName(cfg.Provider), err)
+	}
+	return NewFantasyModel(provider), nil
+}
+
+// This is a bit hacky, but I don't really see a big issue including the API key in the
+// Authorization header by default as well. Many providers accept the API key in this header.
+func headersWithAuthorization(headers map[string]string, apiKey string) map[string]string {
+	if apiKey == "" {
+		return headers
+	}
+	headers = maps.Clone(headers)
+	if headers == nil {
+		headers = make(map[string]string, 1)
+	}
+	if _, configured := headers["Authorization"]; !configured {
+		headers["Authorization"] = "Bearer " + apiKey
+	}
+	return headers
+}
+
+func providerName(provider Provider) Provider {
+	if provider == "" {
+		return ProviderAnthropic
+	}
+	return provider
+}
+
+// NewFantasyModel adapts an already constructed fantasy provider. Most callers
+// should use New; this constructor remains available for custom providers.
 func NewFantasyModel(p fantasy.Provider) *FantasyModel {
 	return &FantasyModel{provider: p, cache: map[string]fantasy.LanguageModel{}}
 }
@@ -41,7 +145,9 @@ func (m *FantasyModel) Generate(ctx context.Context, req ModelRequest) (fantasy.
 	}
 
 	prompt := make([]fantasy.Message, 0, len(req.Messages)+1)
-	prompt = append(prompt, fantasy.NewSystemMessage(req.System))
+	if req.System != "" {
+		prompt = append(prompt, fantasy.NewSystemMessage(req.System))
+	}
 	prompt = append(prompt, req.Messages...)
 
 	resp, err := lm.Generate(ctx, fantasy.Call{

@@ -7,8 +7,8 @@ one mutable `agent.Session` through the model/tool loop.
 ```mermaid
 flowchart LR
     CLI[examples/code-review] --> Agent[agent.Agent]
-    Anthropic[Anthropic provider] --> Fantasy[model.FantasyModel]
-    Fantasy --> Agent
+    Config[model.Config] --> Model[model.New]
+    Model --> Agent
     Discard[agent.DiscardStore] --> Agent
     LocalFactory[sandbox.LocalFactory] --> Agent
     OSTools["bash · read_file · edit_file · write_file"] --> Agent
@@ -28,12 +28,13 @@ flowchart LR
 The example owns the concrete dependencies; the core agent owns the loop.
 
 ```go
-provider, _ := anthropic.New(
-    anthropic.WithAPIKey(os.Getenv("ANTHROPIC_API_KEY")),
-)
+m, _ := model.New(model.Config{
+    Provider: model.ProviderAnthropic,
+    APIKey:   os.Getenv("ANTHROPIC_API_KEY"),
+})
 
 a := agent.New(systemPrompt,
-    agent.WithModel(model.NewFantasyModel(provider)),
+    agent.WithModel(m),
     agent.WithStore(agent.DiscardStore{}),
     agent.WithSandbox(sandbox.LocalFactory{Root: workdir}),
     agent.WithTools(
@@ -69,7 +70,7 @@ skill({"skill":"grug-review"})
 sess := &agent.Session{
     ID:       fmt.Sprintf("review-%d", time.Now().Unix()),
     Model:    modelID,
-    Messages: []fantasy.Message{fantasy.NewUserMessage(prompt)},
+    Messages: []model.Message{model.NewUserMessage(prompt)},
     Status:   agent.StatusActive,
 }
 
@@ -127,17 +128,20 @@ escape `workdir` with absolute paths or `..`.
 
 ## Run it
 
-From the repository root:
+From this folder:
 
 ```sh
+export ANTHROPIC_API_URL=https://api.anthropic.com/
 export ANTHROPIC_API_KEY=...
-go run ./examples/code-review
+go run .
 ```
 
+You can provide these flags to change the defaults without touching code:
+
 ```text
--model    Anthropic model id       (default: claude-sonnet-5)
--workdir  tool working directory   (default: examples/code-review/checkout)
--prompt   initial user message
+-model    Anthropic model id       (default: gemma4:31b-cloud)
+-workdir  tool working directory   (default: checkout)
+-prompt   initial user message     (there is a default one too)
 ```
 
 The [`checkout/`](checkout/) package is intentionally imperfect and has its
