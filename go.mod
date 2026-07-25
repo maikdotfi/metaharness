@@ -2,7 +2,10 @@ module github.com/maikdotfi/metaharness
 
 go 1.26.5
 
-require charm.land/fantasy v0.38.1
+require (
+	charm.land/fantasy v0.38.1
+	github.com/go-telegram/bot v1.22.0
+)
 
 require (
 	cloud.google.com/go v0.123.0 // indirect
