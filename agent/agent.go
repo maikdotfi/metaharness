@@ -8,6 +8,10 @@ type Agent struct {
 	Model        model.ModelClient
 	Store        SessionStore
 	Newbox       SandboxFactory
+
+	// Sandbox is the sandbox new sessions run in. A session that already names
+	// one keeps it.
+	Sandbox SandboxSpec
 }
 
 type Option func(*Agent)
@@ -15,6 +19,11 @@ type Option func(*Agent)
 func WithModel(m model.ModelClient) Option { return func(a *Agent) { a.Model = m } }
 func WithStore(s SessionStore) Option      { return func(a *Agent) { a.Store = s } }
 func WithSandbox(f SandboxFactory) Option  { return func(a *Agent) { a.Newbox = f } }
+
+// WithSandboxSpec names the sandbox new sessions run in. Which sandbox to use
+// is the application's choice, never the library's.
+func WithSandboxSpec(s SandboxSpec) Option { return func(a *Agent) { a.Sandbox = s } }
+
 func WithTools(ts ...Tool) Option {
 	return func(a *Agent) {
 		a.Tools = make(map[string]Tool, len(ts))

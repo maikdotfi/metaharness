@@ -4,8 +4,12 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 
 	"github.com/maikdotfi/metaharness/agent"
 )
@@ -62,23 +66,76 @@ func (l *Local) Exec(ctx context.Context, cmd agent.Command) (agent.ExecResult, 
 // uniform across implementations.
 func (l *Local) Close() error { return nil }
 
-// LocalFactory hands out Local sandboxes, all rooted at Root. It implements
-// agent.SandboxFactory so it can be passed to agent.WithSandbox. The
-// SandboxSpec is ignored: there are no images to pull locally.
-type LocalFactory struct {
-	// Root is the working directory every acquired sandbox runs in. It is
-	// created (including parents) on Acquire if it does not already exist.
+// LocalBackend gives each named sandbox its own directory under Root and runs
+// its commands there on the host. It is the development backend behind a
+// Manager: the filesystem persists because it is only a directory, and the
+// image in a spec is ignored because there is nothing to pull.
+//
+// It inherits Local's lack of isolation, and adds no compute of its own, so
+// there is nothing to release: Stop does nothing and List reports every sandbox
+// as stopped.
+type LocalBackend struct {
+	// Root is the directory sandbox directories are created under. It is
+	// created, with parents, on first use.
 	Root string
 }
 
-var _ agent.SandboxFactory = LocalFactory{}
+var _ Backend = LocalBackend{}
 
-// Acquire returns a Local rooted at f.Root, creating that directory if needed.
-func (f LocalFactory) Acquire(ctx context.Context, _ agent.SandboxSpec) (agent.Sandbox, error) {
-	if f.Root != "" {
-		if err := os.MkdirAll(f.Root, 0o755); err != nil {
-			return nil, err
+func (b LocalBackend) EnsureReady(_ context.Context, spec agent.SandboxSpec) error {
+	dir, err := b.dir(spec.Name)
+	if err != nil {
+		return err
+	}
+	return os.MkdirAll(dir, 0o755)
+}
+
+func (b LocalBackend) Exec(ctx context.Context, name string, cmd agent.Command) (agent.ExecResult, error) {
+	dir, err := b.dir(name)
+	if err != nil {
+		return agent.ExecResult{}, err
+	}
+	return (&Local{Dir: dir}).Exec(ctx, cmd)
+}
+
+// Stop does nothing: a directory holds no compute to release.
+func (b LocalBackend) Stop(context.Context, string) error { return nil }
+
+// Destroy removes the sandbox's directory. A sandbox that is already gone is
+// success.
+func (b LocalBackend) Destroy(_ context.Context, name string) error {
+	dir, err := b.dir(name)
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(dir)
+}
+
+// List reports the directories under Root as stopped sandboxes. A Root that
+// does not exist yet is simply an empty backend.
+func (b LocalBackend) List(context.Context) ([]BackendSandbox, error) {
+	entries, err := os.ReadDir(b.Root)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var found []BackendSandbox
+	for _, entry := range entries {
+		if entry.IsDir() {
+			found = append(found, BackendSandbox{Name: entry.Name(), State: BackendStopped})
 		}
 	}
-	return &Local{Dir: f.Root}, nil
+	return found, nil
+}
+
+// dir keeps a sandbox name a name. Anything that could point somewhere other
+// than a direct child of Root — a path separator, a parent reference, an
+// absolute path — is rejected rather than resolved.
+func (b LocalBackend) dir(name string) (string, error) {
+	if name == "" || name == "." || name == ".." || name != filepath.Base(name) {
+		return "", fmt.Errorf("sandbox: %q is not a usable local sandbox name", name)
+	}
+	return filepath.Join(b.Root, name), nil
 }

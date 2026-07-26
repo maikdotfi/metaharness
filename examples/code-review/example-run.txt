@@ -1,0 +1,73 @@
+go run .
+session review-1784888752
+
+→ skill {"skill":"grug-review"}
+← <skill_content name="grug-review">
+Review code looking for things that would lead the grug brained developer to reach for his club.
+Use the grug brained developer tone when giving the feedback.
+
+Below…
+→ bash {"cmd":"find . -maxdepth 2 -not -path '*/.*'"}
+← .
+./go.mod
+./cart.go
+./cart_test.go
+
+→ read_file {"path":"cart.go"}
+←      1        package checkout
+     2
+     3  import "fmt"
+     4
+     5  // Inventory maps a SKU to the number of units available.
+     6  type Inventory map[string]int
+     7
+     8  type Item struct {
+    …
+→ read_file {"path":"cart_test.go"}
+←      1        package checkout
+     2
+     3  import "testing"
+     4
+     5  func TestTotalCentsAppliesCoupon(t *testing.T) {
+     6          var cart Cart
+     7          if err := cart.Add("coffee", 2, 500); err != nil {…
+→ bash {"cmd":"go test -v ./..."}
+← error: === RUN   TestTotalCentsAppliesCoupon
+--- PASS: TestTotalCentsAppliesCoupon (0.00s)
+=== RUN   TestAddRejectsNegativeQuantities
+    cart_test.go:21: expected negative quantity to be rejected
+--- FAIL: TestAddRejectsNegativeQuantities (0.00s)
+=== RUN   TestCheckoutRejectsMissingInventory
+--- PASS: TestCheckoutRejectsMissingInventory (0.00s)
+FAIL
+FAIL    example.com/checkout    0.354s
+FAIL
+
+
+grug look at code. grug find things that make grug reach for club.
+
+### 1. Bug: Grug find lie in test
+`cart_test.go:17` say it reject negative quantity. But `cart.go:24` not check quantity!
+Test fail because code not do what it say. This make grug very angry. Fix code or fix test, but not lie to grug.
+
+### 2. Precision: Math go boom
+`cart.go:52`: `lineTotal -= lineTotal * c.Coupon.PercentOff / 100`
+This is "big brain" math. If `PercentOff` is 100, total 0. Good. But if `PercentOff` is 110, price become negative? Store pay customer to take item?
+Grug not like store giving money away. Put limit on coupon or use better math.
+
+### 3. API: Coupon too simple
+`cart.go:40`: `ApplyCoupon(code string, percentOff int)`
+Why grug need to tell cart how much percent off? Cart should just take `code`. If cart know percent, cart is doing too much. Logic for "what code means" should be in separate place, not passed in by whoever call `ApplyCoupon`.
+
+### 4. Complexity: Inventory map
+`cart.go:59`: `Checkout(inventory Inventory)`
+Pass map of all things in world to checkout? Very big brain. Very brittle.
+If inventory is huge, grug think too much. Better to have `Inventory` be thing with `Check(sku, qty)` method.
+
+### Summary for big brain:
+- `cart.go:24`: Missing check for `quantity < 0`.
+- `cart.go:52`: Potential for negative totals with high coupon values.
+- `cart.go:40`: API leak. Caller should not provide the discount value.
+- `cart.go:59`: Poor abstraction of inventory.
+
+--- done: 11346 input tokens, 556 output tokens ---

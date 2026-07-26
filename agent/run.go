@@ -37,7 +37,12 @@ func (a *Agent) Run(ctx context.Context, sess *Session) (<-chan Event, error) {
 	go func() {
 		defer close(out)
 
-		box, err := a.Newbox.Acquire(ctx, sess.Sandbox)
+		// The session records the sandbox it ran in, so resuming it later binds
+		// the same name and the same filesystem.
+		if sess.Sandbox.Name == "" {
+			sess.Sandbox = a.Sandbox
+		}
+		box, err := a.Newbox.Open(sess.Sandbox)
 		if err != nil {
 			a.fail(ctx, sess, out, err)
 			return

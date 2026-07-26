@@ -1,0 +1,174 @@
+go run . -think -effort medium
+session review-1784897445
+
+
+💭 Okay, I need to review the checkout package.
+First, I'll start by loading the `grug-review` skill to understand the desired tone and focus.
+→ skill {"skill":"grug-review"}
+← <skill_content name="grug-review">
+Review code looking for things that would lead the grug brained developer to reach for his club.
+Use the grug brained developer tone when giving the feedback.
+
+Below…
+
+💭 Okay, I need to review the "checkout package". First, I need to see what files are in the current directory.
+→ bash {"cmd":"find . -maxdepth 2 -not -path '*/.*'"}
+← .
+./go.mod
+./cart.go
+./cart_test.go
+
+
+💭 Okay, I see `cart.go` and `cart_test.go`. I'll start by reading these files to understand the implementation.
+→ read_file {"path":"cart.go"}
+←      1        package checkout
+     2
+     3  import "fmt"
+     4
+     5  // Inventory maps a SKU to the number of units available.
+     6  type Inventory map[string]int
+     7
+     8  type Item struct {
+    …
+
+💭 Okay, I've read `cart.go`. Now I'll read `cart_test.go` to see how it's being used and if there are any bugs I can find with tests.
+→ read_file {"path":"cart_test.go"}
+←      1        package checkout
+     2
+     3  import "testing"
+     4
+     5  func TestTotalCentsAppliesCoupon(t *testing.T) {
+     6          var cart Cart
+     7          if err := cart.Add("coffee", 2, 500); err != nil {…
+
+💭 Okay, I've read the code. Let's look for "complexity" and things that make Grug reach for the club.
+
+1.  `cart.go:24`: `Add` method.
+    *   It checks for empty SKU and negative unit price.
+    *   Wait, it *doesn't* check for negative quantity.
+    *   `cart_test.go:17`: `TestAddRejectsNegativeQuantities` exists, but it's testing that it *should* be rejected. Let's see if it actually is.
+
+Wait, I see:
+`cart.go`:
+```go
+24      func (c *Cart) Add(sku string, quantity int, unitPriceCents int) error {
+25              if sku == "" {
+26                      return fmt.Errorf("sku is required")
+27              }
+28              if unitPriceCents < 0 {
+29                      return fmt.Errorf("unit price cannot be negative")
+30              }
+31
+32              c.Items = append(c.Items, Item{
+33                      SKU:            sku,
+34                      Quantity:       quantity,
+35                      UnitPriceCents: unitPriceCents,
+36              })
+37              return nil
+38      }
+```
+There is no check for `quantity < 0`.
+
+Let's run the tests to see if they fail.
+→ bash {"cmd":"go test ./..."}
+← error: --- FAIL: TestAddRejectsNegativeQuantities (0.00s)
+    cart_test.go:21: expected negative quantity to be rejected
+FAIL
+FAIL    example.com/checkout    0.343s
+FAIL
+
+
+💭 Okay, I've reviewed the code.
+1. `cart.go` contains the logic for a shopping cart.
+2. `cart_test.go` contains some tests.
+3. Running `go test ./...` failed. `TestAddRejectsNegativeQuantities` failed because `cart.Add` does not check for negative quantities.
+
+Looking at `cart.go`:
+- Line 24-38: `Add` method. It checks if `sku` is empty and if `unitPriceCents` is negative. It *does not* check if `quantity` is negative. This is a bug.
+- Line 47-57: `TotalCents` method. It applies a coupon to each item. If `PercentOff` is > 100, `lineTotal` could become negative. If `PercentOff` is very large, the total could be weird.
+- Line 59-67: `Checkout` method. It checks inventory.
+
+Wait, the tests are failing.
+`TestAddRejectsNegativeQuantities` fails because line 20 in `cart_test.go` expects an error when quantity is -2, but `cart.Add` in `cart.go` doesn't return an error for negative quantity.
+
+Also, if I add a negative quantity, `TotalCents` will subtract from the total.
+
+Let's look at `TotalCents` again.
+`lineTotal := item.Quantity * item.UnitPriceCents`
+If quantity is negative, `lineTotal` is negative.
+
+Another thing: `ApplyCoupon` allows any `percentOff`. If `percentOff` is 110, the total becomes negative.
+
+The `Inventory` type is just a `map[string]int`.
+
+Grug brain feedback:
+- `Add` let negative quantity in. Bad. Grug reach for club.
+- `ApplyCoupon` let any number in. Big brain say "percent", grug say "where limit?".
+- Tests fail. Very bad.
+
+Let's double check the code for other "big brain" things or "complexity".
+The code is actually quite simple. But it's buggy.
+
+Wait, the `Add` method takes `quantity`. If I add the same SKU twice, it just appends to the slice. `Checkout` then checks inventory for each item separately?
+No, `Checkout` does:
+```go
+        for _, item := range c.Items {
+                available := inventory[item.SKU]
+                if available < item.Quantity {
+                        return fmt.Errorf("not enough inventory for %s", item.SKU)
+                }
+        }
+```
+If I have:
+Items: `[{SKU: "coffee", Quantity: 2}, {SKU: "coffee", Quantity: 2}]`
+And Inventory: `{"coffee": 3}`
+The first item (2) is `< 3` (ok).
+The second item (2) is `< 3` (ok).
+But total requested is 4, and only 3 available. `Checkout` returns `nil`.
+This is a bug. It should sum quantities per SKU before checking inventory or decrement inventory as it goes.
+
+Grug review:
+1. `Add` allow negative quantity. (Bug)
+2. `Checkout` not count total quantity of same item. (Bug)
+3. `ApplyCoupon` no check for limits. (Potential bug/bad API)
+4. Tests failing. (Very bad)
+
+I will write the feedback now.
+
+grug look at code. grug find many thing make grug reach for club.
+
+**1. Negative Quantity Bug**
+`cart.go:24` - `Add` let negative quantity in.
+`cart_test.go:20` try to catch this, but `Add` not check for it.
+Test fail. Grug hate failing test.
+Why let negative coffee in cart? Now grug owe store coffee? No.
+Fix: check `quantity < 0` in `Add`.
+
+**2. Inventory Logic Broken**
+`cart.go:59` - `Checkout` have big brain error.
+If grug add "coffee" 2 times, once 2 units, once 2 units, total 4.
+If store have 3 coffee, `Checkout` look at first item (2 < 3 ok), look at second item (2 < 3 ok).
+`Checkout` say "yes", but store only have 3!
+Grug try to take 4, store have 3. Grug get hit with club.
+Fix: sum quantities of same SKU before check inventory.
+
+**3. Coupon API too Loose**
+`cart.go:40` - `ApplyCoupon` take `percentOff int`.
+What if grug put 110? Now item cost negative money? Store pay grug to take coffee?
+What if grug put -50? Now coffee cost more?
+API too trusty. API make grug think too much about what happen when number big or small.
+Fix: limit `percentOff` between 0 and 100.
+
+**Summary**
+Code simple, but logic leaky. Fix bugs or grug use club.
+
+--- done: 11285 input tokens, 1719 output tokens ---
+
+---
+notes:
+
+this is apparently about ~29% more expensive that the no thinking run, around 0.1$ at API prices.
+(Claude Opus 4.8
+Input: $5/M | Output: $25/M)
+
+Of course we did not use Opus, it's an expensive model.

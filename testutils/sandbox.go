@@ -40,6 +40,6 @@ func (NopSandbox) Close() error { return nil }
 // agent loop acquires from.
 type NopFactory struct{}
 
-func (NopFactory) Acquire(context.Context, agent.SandboxSpec) (agent.Sandbox, error) {
+func (NopFactory) Open(agent.SandboxSpec) (agent.Sandbox, error) {
 	return NopSandbox{}, nil
 }

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/maikdotfi/metaharness/agent"
@@ -61,10 +62,21 @@ func run(ctx context.Context, modelID, workdir, prompt string, think bool, effor
 		return err
 	}
 
+	// A sandbox is addressed by name, and on the local backend a name is a
+	// directory under Root — so reviewing ./checkout is the sandbox "checkout"
+	// rooted at ".". The review is read-mostly and single-shot, but it goes
+	// through the manager like anything else.
+	root, name := filepath.Split(filepath.Clean(workdir))
+	if root == "" {
+		root = "."
+	}
+	sandboxes := sandbox.NewManager(sandbox.LocalBackend{Root: root})
+
 	a := agent.New(systemPrompt,
 		agent.WithModel(m),
 		agent.WithStore(agent.DiscardStore{}),
-		agent.WithSandbox(sandbox.LocalFactory{Root: workdir}),
+		agent.WithSandbox(sandboxes),
+		agent.WithSandboxSpec(agent.SandboxSpec{Name: name}),
 		agent.WithTools(
 			agent.Adapt(tools.Bash{}),
 			agent.Adapt(tools.ReadFile{}),

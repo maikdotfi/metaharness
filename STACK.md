@@ -8,17 +8,21 @@
 - [charm.land/fantasy](https://pkg.go.dev/charm.land/fantasy) - model,
   message, usage, and schema helper types used by the agent loop and tool
   adapter.
+- [github.com/docker/docker/client](https://pkg.go.dev/github.com/docker/docker/client) -
+  the Docker daemon SDK, used only by `sandbox/docker`. Nothing else imports it,
+  and an application that sticks to the local sandbox never talks to a daemon.
 
 ## Layout
 
 ```
 agent/                    agent loop, sessions, store interface, tool plumbing
 model/                    model client abstractions and fantasy adapter
-sandbox/                  local sandbox implementation
+sandbox/                  sandbox lifecycle manager and the local backend
+sandbox/docker/           Docker backend: one long-lived container per sandbox
 tools/                    built-in tools
 skills/                   bundled skill prompts
 examples/                 sample agents and target projects
-Makefile                  test target
+Makefile                  test targets
 ```
 
 ## Getting started
@@ -26,6 +30,9 @@ Makefile                  test target
 ```sh
 make test
 ```
+
+`make test-docker` additionally runs the sandbox suite against a real Docker
+daemon; it needs one running and is otherwise skipped.
 
 Meta Harness is not executable by itself. Applications import the library,
 choose a model, tools, sandbox, and session store, then assemble their own

@@ -10,7 +10,7 @@ flowchart LR
     Config[model.Config] --> Model[model.New]
     Model --> Agent
     Discard[agent.DiscardStore] --> Agent
-    LocalFactory[sandbox.LocalFactory] --> Agent
+    Sandboxes["sandbox.Manager\nsandbox.LocalBackend"] --> Agent
     OSTools["bash · read_file · edit_file · write_file"] --> Agent
     Skill["skill · grug-review"] --> Agent
 
@@ -18,7 +18,7 @@ flowchart LR
     Agent --> Run
     Run --> Events["assistant · tool_result · done · error"]
 
-    Run --> Local["sandbox.Local\nworkdir = checkout/"]
+    Run --> Local["sandbox \"checkout\"\nworkdir = checkout/"]
     OSTools --> Local
     Local --> Checkout[checkout package]
 ```
@@ -36,7 +36,8 @@ m, _ := model.New(model.Config{
 a := agent.New(systemPrompt,
     agent.WithModel(m),
     agent.WithStore(agent.DiscardStore{}),
-    agent.WithSandbox(sandbox.LocalFactory{Root: workdir}),
+    agent.WithSandbox(sandbox.NewManager(sandbox.LocalBackend{Root: "."})),
+    agent.WithSandboxSpec(agent.SandboxSpec{Name: "checkout"}),
     agent.WithTools(
         agent.Adapt(tools.Bash{}),
         agent.Adapt(tools.ReadFile{}),
@@ -86,11 +87,11 @@ sequenceDiagram
     participant Agent as agent.Run
     participant Model as FantasyModel / Anthropic
     participant Tool as selected tool
-    participant Box as sandbox.Local
+    participant Box as sandbox.Manager
     participant Store as DiscardStore
 
     App->>Agent: Run(ctx, session)
-    Agent->>Box: Acquire(session.Sandbox)
+    Agent->>Box: Open(session.Sandbox)
 
     loop Until assistant returns without tool calls
         Agent->>Model: Generate(system prompt, transcript, tool schemas)
@@ -122,9 +123,11 @@ through `agent.WithStore` when persistence is wanted.
 Session = ID + model ID + fantasy messages + token usage + status + sandbox spec
 ```
 
-`sandbox.Local` only sets the process working directory. It is deliberately a
-development adapter, not security isolation: commands can access the host and
-escape `workdir` with absolute paths or `..`.
+The spec names the sandbox; on `sandbox.LocalBackend` a name is a directory
+under its root, and commands run there on the host. It only sets the process
+working directory, and is deliberately a development backend rather than
+security isolation: commands can reach the host and escape `workdir` with
+absolute paths or `..`.
 
 ## Run it
 
