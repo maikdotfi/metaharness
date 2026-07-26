@@ -6,6 +6,10 @@
 // Run from examples/code-review with ANTHROPIC_API_KEY set:
 //
 //	go run .
+//	go run . -sandbox docker
+//
+// The two runs review the same files and run the same tests; the only difference
+// is where. See README.md for why the container image needs real bash.
 package main
 
 import (
@@ -14,6 +18,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/maikdotfi/metaharness/agent"
@@ -37,17 +42,42 @@ func main() {
 	prompt := flag.String("prompt", defaultPrompt, "user prompt to start the review with")
 	think := flag.Bool("think", false, "enable extended thinking output")
 	effort := flag.String("effort", "medium", "thinking effort level (low, medium, high, xhigh, max); only used with -think")
+	sandboxKind := flag.String("sandbox", "local", "sandbox backend: local or docker")
+	image := flag.String("image", "golang:1.26", "container image to review in; only used with -sandbox docker")
 	flag.Parse()
 
 	if os.Getenv("ANTHROPIC_API_KEY") == "" {
 		log.Fatal("ANTHROPIC_API_KEY is not set")
 	}
-	if err := run(context.Background(), *modelID, *workdir, *prompt, *think, *effort); err != nil {
+	factory, err := newSandbox(*sandboxKind, *workdir, *image)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := run(context.Background(), *modelID, factory, *prompt, *think, *effort); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(ctx context.Context, modelID, workdir, prompt string, think bool, effort string) error {
+// newSandbox picks where the agent's tools run. Choosing the sandbox is the
+// application's job: the library only takes a factory and a spec.
+func newSandbox(kind, workdir, image string) (agent.SandboxFactory, error) {
+	switch kind {
+	case "local":
+		return sandbox.LocalFactory{Root: workdir}, nil
+	case "docker":
+		// The container equivalent of "run on the host in workdir" is to bind
+		// mount that directory in, which docker requires as an absolute path.
+		abs, err := filepath.Abs(workdir)
+		if err != nil {
+			return nil, err
+		}
+		return agent.DockerFactory{Image: image, Mount: abs, Dir: "/work"}, nil
+	default:
+		return nil, fmt.Errorf("unknown -sandbox %q: want local or docker", kind)
+	}
+}
+
+func run(ctx context.Context, modelID string, factory agent.SandboxFactory, prompt string, think bool, effort string) error {
 	cfg := model.Config{
 		Provider: model.ProviderAnthropic,
 		APIKey:   os.Getenv("ANTHROPIC_API_KEY"),
@@ -64,7 +94,7 @@ func run(ctx context.Context, modelID, workdir, prompt string, think bool, effor
 	a := agent.New(systemPrompt,
 		agent.WithModel(m),
 		agent.WithStore(agent.DiscardStore{}),
-		agent.WithSandbox(sandbox.LocalFactory{Root: workdir}),
+		agent.WithSandbox(factory),
 		agent.WithTools(
 			agent.Adapt(tools.Bash{}),
 			agent.Adapt(tools.ReadFile{}),

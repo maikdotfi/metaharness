@@ -12,9 +12,10 @@
 ## Layout
 
 ```
-agent/                    agent loop, sessions, store interface, tool plumbing
+agent/                    agent loop, sessions, store interface, tool plumbing,
+                          sandbox registry (sharing, sleep) and docker backend
 model/                    model client abstractions and fantasy adapter
-sandbox/                  local sandbox implementation
+sandbox/                  local (host-exec) sandbox implementation
 tools/                    built-in tools
 skills/                   bundled skill prompts
 examples/                 sample agents and target projects

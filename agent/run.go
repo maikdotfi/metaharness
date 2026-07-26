@@ -33,6 +33,11 @@ func (a *Agent) Run(ctx context.Context, sess *Session) (<-chan Event, error) {
 		return nil, errors.New("agent not fully wired")
 	}
 
+	// Record which sandbox this run uses before anything can save the session, so
+	// the transcript always says where it ran — including when it failed to get
+	// there.
+	sess.Sandbox = a.SandboxFor(sess)
+
 	out := make(chan Event, 8)
 	go func() {
 		defer close(out)
@@ -42,6 +47,7 @@ func (a *Agent) Run(ctx context.Context, sess *Session) (<-chan Event, error) {
 			a.fail(ctx, sess, out, err)
 			return
 		}
+		// Detach, never destroy: a durable sandbox outlives this run.
 		defer box.Close()
 
 		for {

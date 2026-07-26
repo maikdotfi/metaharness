@@ -37,12 +37,22 @@ const typingInterval = 4 * time.Second
 // sandbox selection in the assembling application.
 type SessionFactory func() *agent.Session
 
+// SandboxSource reports live sandbox state so /status can say whether the
+// workbench is awake. *agent.Registry satisfies it. It is an optional seam, not a
+// requirement: a bridge without one reports the sandbox's name only.
+type SandboxSource interface {
+	Snapshot() []agent.SandboxInfo
+}
+
 // Config configures the personal bridge.
 type Config struct {
 	Token        string
 	Agent        *agent.Agent
 	NewSession   SessionFactory
 	AllowedUsers []int64
+
+	// Sandboxes optionally supplies live sandbox state for /status.
+	Sandboxes SandboxSource
 
 	// ShowThinking includes the model's raw reasoning text in the progress
 	// status message. Progress itself is always reported and is not optional;
@@ -83,6 +93,7 @@ type personalBot struct {
 	agent        *agent.Agent
 	api          telegramAPI
 	newSession   SessionFactory
+	sandboxes    SandboxSource
 	allowed      map[int64]bool
 	showThinking bool
 
@@ -109,6 +120,7 @@ func Run(ctx context.Context, cfg Config) error {
 	pb := &personalBot{
 		agent:        cfg.Agent,
 		newSession:   cfg.NewSession,
+		sandboxes:    cfg.Sandboxes,
 		allowed:      allowed,
 		showThinking: cfg.ShowThinking,
 		editGap:      defaultEditGap,
@@ -190,8 +202,8 @@ func commandName(text string) string {
 const helpText = `I run a Meta Harness agent. Just send a message to give it a task.
 
 Commands:
-/new, /clear — discard the current context and start a fresh task
-/status — show the current session id, model, message count, and token usage
+/new, /clear — discard the current context and start a fresh task, keeping the sandbox
+/status — show the current session id, model, sandbox, message count, and token usage
 /help, /start — show this help`
 
 // handleCommand runs a bridge command. Commands take the same turn lock, so one
@@ -203,19 +215,46 @@ func (b *personalBot) handleCommand(ctx context.Context, chatID int64, cmd strin
 
 	switch cmd {
 	case "/new", "/clear":
+		previous := b.current
 		b.current = b.newSession()
-		b.send(ctx, chatID, "Started a fresh session: "+b.current.ID)
+		// The sandbox is the workbench and the session is the task, so a fresh
+		// task stays at the same bench. A factory that names a sandbox itself
+		// still wins.
+		if b.current.Sandbox == (agent.SandboxSpec{}) {
+			b.current.Sandbox = previous.Sandbox
+		}
+		b.send(ctx, chatID, "Started a fresh session: "+b.current.ID+
+			"\nsandbox "+b.sandboxStatus(b.current)+" (kept)")
 	case "/status":
 		s := b.current
 		b.send(ctx, chatID, fmt.Sprintf(
-			"session %s\nmodel %s\nmessages %d\ntokens: %d in / %d out",
-			s.ID, s.Model, len(s.Messages), s.Usage.InputTokens, s.Usage.OutputTokens,
+			"session %s\nmodel %s\nsandbox %s\nmessages %d\ntokens: %d in / %d out",
+			s.ID, s.Model, b.sandboxStatus(s), len(s.Messages),
+			s.Usage.InputTokens, s.Usage.OutputTokens,
 		))
 	case "/help", "/start":
 		b.send(ctx, chatID, helpText)
 	default:
 		b.send(ctx, chatID, "Unknown command.\n\n"+helpText)
 	}
+}
+
+// sandboxStatus describes the sandbox a session works in: its name, plus whether
+// it is awake when the application wired a source of live state. A session with no
+// named sandbox gets a throwaway one per turn, which is worth saying out loud.
+func (b *personalBot) sandboxStatus(sess *agent.Session) string {
+	spec := b.agent.SandboxFor(sess)
+	if spec.Name == "" {
+		return "ephemeral"
+	}
+	if b.sandboxes != nil {
+		for _, info := range b.sandboxes.Snapshot() {
+			if info.Name == spec.Name {
+				return fmt.Sprintf("%s (%s)", info.Name, info.State)
+			}
+		}
+	}
+	return spec.Name
 }
 
 // handlePrompt runs one agent turn for a text message: it appends the prompt to

@@ -137,6 +137,51 @@ func newTestBot(t *testing.T, m model.ModelClient, showThinking bool) (*personal
 	return pb, api
 }
 
+// newSandboxBot wires a bot whose agent works in one durable sandbox behind a
+// registry — the shape an application gets from METAHARNESS_SANDBOX. It returns
+// the backend the registry decorates so a test can count how often the sandbox
+// was really created.
+func newSandboxBot(t *testing.T, m model.ModelClient) (*personalBot, *fakeAPI, *testutils.SleepyFactory) {
+	t.Helper()
+	inner := &testutils.SleepyFactory{}
+	reg := agent.NewRegistry(inner,
+		agent.WithClock(testutils.NewClock(time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC))))
+
+	a := agent.New("test system prompt",
+		agent.WithModel(m),
+		agent.WithSandbox(reg),
+		agent.WithSandboxSpec(agent.SandboxSpec{Name: "work", Image: "golang:1.26", Durable: true}),
+		agent.WithTools(agent.Adapt(tools.Bash{})),
+	)
+	var n int
+	factory := func() *agent.Session {
+		n++
+		return &agent.Session{ID: fmt.Sprintf("sess_%d", n), Model: "test-model", Status: agent.StatusActive}
+	}
+	api := &fakeAPI{}
+	pb := &personalBot{
+		agent:      a,
+		api:        api,
+		newSession: factory,
+		sandboxes:  reg,
+		allowed:    map[int64]bool{allowedUser: true},
+		editGap:    0,
+		now:        time.Now,
+		current:    factory(),
+	}
+	return pb, api, inner
+}
+
+// lastSent returns the most recent message the bridge sent.
+func lastSent(t *testing.T, api *fakeAPI) string {
+	t.Helper()
+	sends := api.sentTexts()
+	if len(sends) == 0 {
+		t.Fatal("the bridge sent nothing")
+	}
+	return sends[len(sends)-1]
+}
+
 func countEqual(ss []string, want string) int {
 	n := 0
 	for _, s := range ss {
@@ -273,6 +318,71 @@ func TestCommandsNotAppendedToTranscript(t *testing.T) {
 	}
 	if len(api.sentTexts()) != 4 {
 		t.Fatalf("expected one reply per command, got %d", len(api.sentTexts()))
+	}
+}
+
+// TestStatusReportsTheSandbox pins that the user can see which workbench the
+// agent is on and whether it is awake — the sandbox is not invisible plumbing.
+func TestStatusReportsTheSandbox(t *testing.T) {
+	m := &testutils.ScriptedModel{Replies: []fantasy.Message{asstText("ok")}}
+	pb, api, _ := newSandboxBot(t, m)
+	ctx := context.Background()
+
+	pb.handleUpdate(ctx, privateText(allowedUser, 100, "/status"))
+	if got := lastSent(t, api); !strings.Contains(got, "sandbox work") {
+		t.Errorf("/status before any turn = %q, want the sandbox name in it", got)
+	}
+
+	pb.handleUpdate(ctx, privateText(allowedUser, 100, "do work"))
+	pb.handleUpdate(ctx, privateText(allowedUser, 100, "/status"))
+
+	if got := lastSent(t, api); !strings.Contains(got, "sandbox work (awake)") {
+		t.Errorf("/status after a turn = %q, want the sandbox name and state", got)
+	}
+}
+
+// TestStatusReportsAnEphemeralSandbox pins that a bridge without a named sandbox
+// says so, rather than reporting a blank or a fake name.
+func TestStatusReportsAnEphemeralSandbox(t *testing.T) {
+	m := &testutils.ScriptedModel{}
+	pb, api := newTestBot(t, m, false)
+
+	pb.handleUpdate(context.Background(), privateText(allowedUser, 100, "/status"))
+
+	if got := lastSent(t, api); !strings.Contains(got, "sandbox ephemeral") {
+		t.Errorf("/status = %q, want it to report an ephemeral sandbox", got)
+	}
+}
+
+// TestNewKeepsTheSandbox pins the division the plan draws: the sandbox is the
+// workbench and the session is the task, so starting a fresh task stays at the
+// same bench instead of building a new one.
+func TestNewKeepsTheSandbox(t *testing.T) {
+	m := &testutils.ScriptedModel{Replies: []fantasy.Message{asstText("a"), asstText("b")}}
+	pb, _, inner := newSandboxBot(t, m)
+	ctx := context.Background()
+
+	pb.handleUpdate(ctx, privateText(allowedUser, 100, "first task"))
+	before := pb.current.ID
+
+	pb.handleUpdate(ctx, privateText(allowedUser, 100, "/new"))
+	if pb.current.ID == before {
+		t.Fatal("/new did not replace the session")
+	}
+	if len(pb.current.Messages) != 0 {
+		t.Fatalf("/new left %d messages behind", len(pb.current.Messages))
+	}
+
+	pb.handleUpdate(ctx, privateText(allowedUser, 100, "second task"))
+
+	if got := len(inner.Specs()); got != 1 {
+		t.Errorf("the backend built %d sandboxes across a /new, want 1", got)
+	}
+	if got := pb.current.Sandbox.Name; got != "work" {
+		t.Errorf("the fresh session's sandbox = %q, want work", got)
+	}
+	if got := inner.Boxes()[0].Count("close"); got != 0 {
+		t.Errorf("the sandbox was closed %d times; discarding a session must not take it away", got)
 	}
 }
 

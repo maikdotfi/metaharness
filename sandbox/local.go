@@ -58,8 +58,13 @@ func (l *Local) Exec(ctx context.Context, cmd agent.Command) (agent.ExecResult, 
 }
 
 // Close releases the handle. Local holds no resources, so there is nothing to
-// do — but it satisfies the Sandbox interface and keeps callers' defer box.Close()
-// uniform across implementations.
+// do — which is already the detach the Sandbox interface asks for: closing a
+// handle never takes a sandbox away. It keeps callers' defer box.Close() uniform
+// across implementations.
+//
+// Local does not implement agent.Sleeper: there is no compute to release when the
+// commands are host processes. A registry wrapping it therefore never arms a
+// sleep deadline.
 func (l *Local) Close() error { return nil }
 
 // LocalFactory hands out Local sandboxes, all rooted at Root. It implements

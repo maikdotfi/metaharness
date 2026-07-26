@@ -142,7 +142,49 @@ You can provide these flags to change the defaults without touching code:
 -model    Anthropic model id       (default: gemma4:31b-cloud)
 -workdir  tool working directory   (default: checkout)
 -prompt   initial user message     (there is a default one too)
+-sandbox  local or docker          (default: local)
+-image    container image          (default: golang:1.26, -sandbox docker only)
 ```
+
+## Reviewing in a container
+
+```sh
+go run . -sandbox docker
+```
+
+The agent reviews the same files and runs the same tests. The only difference is
+where: `agent.DockerFactory` starts a container, bind mounts `-workdir` at
+`/work`, and runs every tool through `docker exec` instead of on the host.
+
+```go
+abs, _ := filepath.Abs(workdir) // docker needs an absolute path
+factory = agent.DockerFactory{Image: image, Mount: abs, Dir: "/work"}
+```
+
+The bind mount is the whole substance of the swap. `sandbox.LocalFactory{Root:
+"checkout"}` runs on the host in that directory, so the container equivalent has
+to get that directory inside — and the agent can write into it, exactly as it can
+write into `checkout/` on the host today. Same blast radius as the local run, not
+a new one.
+
+The container is ephemeral: it runs with `--rm`, and closing the handle removes
+it. Durable, named sandboxes that survive a run are the registry's job, not this
+example's.
+
+### The image is not arbitrary
+
+Two constraints, both easy to trip over:
+
+- **Real bash.** Every tool shells out through `bash -c`, and the file tools also
+  use `cat`, `mkdir`, `dirname`, `printf`, and `base64`. So "use alpine to keep it
+  small" — the obvious move — fails every single tool: busybox provides `ash`, not
+  `bash`.
+- **A Go toolchain**, because the review prompt asks the agent to run
+  `go test ./...`.
+
+`golang:1.26` satisfies both, which is why it is the default. An image without
+bash does not fail at startup; it fails on the agent's first tool call, which
+reads like the agent being broken rather than the image being wrong.
 
 The [`checkout/`](checkout/) package is intentionally imperfect and has its
 own `go.mod`. Its failing quantity-validation test remains outside the root
