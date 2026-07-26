@@ -21,7 +21,7 @@ func (h *handle) Exec(ctx context.Context, cmd agent.Command) (agent.ExecResult,
 	if h.closed.Load() {
 		return agent.ExecResult{}, ErrClosed
 	}
-	return h.entry.exec(ctx, cmd)
+	return h.entry.ask(request{kind: reqExec, ctx: ctx, cmd: cmd})
 }
 
 // Close releases this handle. It is idempotent and has no lifecycle effect.

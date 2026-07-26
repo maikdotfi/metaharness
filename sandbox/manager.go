@@ -20,6 +20,7 @@ var (
 	ErrNameRequired = errors.New("sandbox: a name is required")
 	ErrDestroyed    = errors.New("sandbox: destroyed")
 	ErrClosed       = errors.New("sandbox: handle is closed")
+	ErrShutdown     = errors.New("sandbox: the manager is closed")
 )
 
 // Manager owns the lifecycle of the named sandboxes this process uses. It
@@ -31,6 +32,10 @@ type Manager struct {
 	clock    Clock
 	idle     time.Duration
 	observer func(Event)
+
+	// closing is closed by Close, and is every sandbox's signal to shut down.
+	closing   chan struct{}
+	closeOnce sync.Once
 
 	// mu guards the name lookup and nothing else, so a slow backend call on one
 	// sandbox never blocks opening or inspecting another.
@@ -53,6 +58,7 @@ func NewManager(backend Backend, opts ...Option) *Manager {
 		backend: backend,
 		clock:   systemClock{},
 		idle:    DefaultIdleTimeout,
+		closing: make(chan struct{}),
 		entries: map[string]*entry{},
 	}
 	for _, o := range opts {
@@ -69,7 +75,11 @@ func (m *Manager) Open(spec agent.SandboxSpec) (agent.Sandbox, error) {
 	if spec.Name == "" {
 		return nil, ErrNameRequired
 	}
-	return &handle{entry: m.entryFor(spec)}, nil
+	e, err := m.entryFor(spec)
+	if err != nil {
+		return nil, err
+	}
+	return &handle{entry: e}, nil
 }
 
 // Destroy removes the named sandbox and its filesystem. It waits for any
@@ -80,16 +90,39 @@ func (m *Manager) Destroy(ctx context.Context, name string) error {
 	if name == "" {
 		return ErrNameRequired
 	}
-	e := m.entryFor(agent.SandboxSpec{Name: name})
-	if err := e.destroy(ctx); err != nil {
+	e, err := m.entryFor(agent.SandboxSpec{Name: name})
+	if err != nil {
+		return err
+	}
+	if _, err := e.ask(request{kind: reqDestroy, ctx: ctx}); err != nil {
 		return err
 	}
 	m.forget(name, e)
 	return nil
 }
 
+// Close releases the manager's own machinery: the goroutine and idle timer
+// behind each sandbox. It waits for whatever is in flight to finish, so a
+// command already running still returns its result to its caller.
+//
+// It deliberately leaves the sandboxes as they are. Outliving the process that
+// used them is the point of them, and Reconcile is how the next one picks them
+// up. Close is idempotent, and a closed manager takes no new work.
+func (m *Manager) Close() error {
+	m.closeOnce.Do(func() { close(m.closing) })
+
+	m.mu.Lock()
+	known := slices.Collect(maps.Values(m.entries))
+	m.mu.Unlock()
+
+	for _, e := range known {
+		<-e.gone
+	}
+	return nil
+}
+
 // Inspect reports what the manager believes about every sandbox it knows,
-// sorted by name. It reads committed state only and never calls the backend, so
+// sorted by name. It reads published state only and never calls the backend, so
 // it stays responsive while sandboxes are busy.
 func (m *Manager) Inspect() []Info {
 	m.mu.Lock()
@@ -125,6 +158,10 @@ type ReconcileReport struct {
 // idle clock, which bounds it to one window. Sandboxes the manager already
 // tracks are left exactly as they are.
 func (m *Manager) Reconcile(ctx context.Context) (ReconcileReport, error) {
+	if m.shuttingDown() {
+		return ReconcileReport{}, ErrShutdown
+	}
+
 	found, err := m.backend.List(ctx)
 	if err != nil {
 		return ReconcileReport{}, err
@@ -132,15 +169,23 @@ func (m *Manager) Reconcile(ctx context.Context) (ReconcileReport, error) {
 
 	var report ReconcileReport
 	for _, bs := range found {
-		e, known := m.adopt(agent.SandboxSpec{Name: bs.Name, Image: bs.Image})
+		e, known, err := m.adopt(agent.SandboxSpec{Name: bs.Name, Image: bs.Image})
+		if err != nil {
+			return ReconcileReport{}, err
+		}
 		if known {
 			continue
 		}
+		state := StateStopped
 		if bs.State == BackendRunning {
-			e.observe(StateReady)
+			state = StateReady
+		}
+		if _, err := e.ask(request{kind: reqObserve, state: state}); err != nil {
+			return ReconcileReport{}, err
+		}
+		if state == StateReady {
 			report.Adopted = append(report.Adopted, bs.Name)
 		} else {
-			e.observe(StateStopped)
 			report.Asleep = append(report.Asleep, bs.Name)
 		}
 	}
@@ -151,20 +196,27 @@ func (m *Manager) Reconcile(ctx context.Context) (ReconcileReport, error) {
 
 // entryFor returns the one entry for spec.Name, creating it on first sight. An
 // existing entry wins: once a name is known, its spec is authoritative.
-func (m *Manager) entryFor(spec agent.SandboxSpec) *entry {
-	e, _ := m.adopt(spec)
-	return e
+func (m *Manager) entryFor(spec agent.SandboxSpec) (*entry, error) {
+	e, _, err := m.adopt(spec)
+	return e, err
 }
 
-func (m *Manager) adopt(spec agent.SandboxSpec) (e *entry, known bool) {
+func (m *Manager) adopt(spec agent.SandboxSpec) (e *entry, known bool, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if e, ok := m.entries[spec.Name]; ok {
-		return e, true
+
+	// Checked under the lock Close collects entries under, so a sandbox is either
+	// refused or started early enough for Close to wait for it.
+	if m.shuttingDown() {
+		return nil, false, ErrShutdown
 	}
-	e = &entry{mgr: m, spec: spec}
+	if e, ok := m.entries[spec.Name]; ok {
+		return e, true, nil
+	}
+	e = newEntry(m, spec)
 	m.entries[spec.Name] = e
-	return e, false
+	go e.run()
+	return e, false, nil
 }
 
 // forget drops a destroyed sandbox from the lookup, unless the name has already
@@ -177,224 +229,283 @@ func (m *Manager) forget(name string, e *entry) {
 	}
 }
 
-// entry is the lifecycle of one named sandbox.
+func (m *Manager) shuttingDown() bool {
+	select {
+	case <-m.closing:
+		return true
+	default:
+		return false
+	}
+}
+
+// reqKind is what a request asks the sandbox's goroutine to do. There is one per
+// thing that can happen to a sandbox that is not simply reading its state.
+type reqKind uint8
+
+const (
+	reqExec reqKind = iota
+	reqIdle
+	reqDestroy
+	reqObserve
+)
+
+// request is one unit of work for a sandbox's goroutine. Every request the
+// goroutine takes is answered exactly once, which is what lets a caller wait on
+// reply with nothing to fall back on.
+type request struct {
+	kind  reqKind
+	ctx   context.Context
+	cmd   agent.Command // reqExec: the command to run
+	state State         // reqObserve: what the backend was found holding
+	due   time.Time     // reqIdle: the deadline this wakeup was scheduled for
+	reply chan reply
+}
+
+type reply struct {
+	res agent.ExecResult
+	err error
+}
+
+// entry is one named sandbox's lifecycle, and the goroutine that runs it.
 //
-// It has two locks. opMu spans a whole operation — one command, stop or destroy
-// at a time — and is held across backend calls, which is what serializes work
-// per sandbox. mu guards the state below and is never held across a backend
-// call, which is what keeps Inspect responsive while a sandbox is busy.
+// All of the lifecycle state lives in fields only that goroutine touches, so
+// there is no lock order to get wrong and no state to guard: run takes one
+// request at a time, and that is what serializes work per sandbox. The only
+// shared state is the snapshot Inspect reads, republished after every
+// transition.
 type entry struct {
 	mgr  *Manager
 	spec agent.SandboxSpec
 
-	opMu sync.Mutex
+	// reqs is unbuffered, so a delivered request is one the goroutine has taken
+	// and will answer.
+	reqs chan request
 
-	mu       sync.Mutex
+	// gone is closed once the goroutine has exited, and why is the reason it did.
+	// why is written before gone is closed, so anyone who has seen gone closed
+	// sees the reason too.
+	gone chan struct{}
+	why  error
+
+	// Owned by run, and touched from nowhere else.
 	state    State
-	gen      uint64 // bumped whenever the idle deadline changes
-	timer    Timer
+	due      time.Time
 	lastExec time.Time
-	dueAt    time.Time
+	timer    Timer
+
+	// mu guards the snapshot below. run is its only writer and never holds it
+	// across a backend call, which is what keeps Inspect responsive.
+	mu   sync.Mutex
+	snap Info
 }
 
-// exec runs one command, making the sandbox ready first if it is not already.
-func (e *entry) exec(ctx context.Context, cmd agent.Command) (agent.ExecResult, error) {
-	e.opMu.Lock()
-	defer e.opMu.Unlock()
-
-	prior, err := e.beginExec()
-	if err != nil {
-		return agent.ExecResult{}, err
+func newEntry(m *Manager, spec agent.SandboxSpec) *entry {
+	e := &entry{
+		mgr:  m,
+		spec: spec,
+		reqs: make(chan request),
+		gone: make(chan struct{}),
 	}
-	if prior != StateReady {
-		if err := e.mgr.backend.EnsureReady(ctx, e.spec); err != nil {
-			e.restore(prior)
-			e.emit(EventPrepareFailed, StatePreparing, prior, err)
-			return agent.ExecResult{}, err
+	e.publish()
+	return e
+}
+
+// ask hands one request to the goroutine and waits for its answer. A sandbox
+// whose goroutine has already exited answers immediately, with the reason it
+// exited: a destroyed sandbox is ErrDestroyed and a closed manager ErrShutdown.
+func (e *entry) ask(req request) (agent.ExecResult, error) {
+	req.reply = make(chan reply, 1)
+	select {
+	case e.reqs <- req:
+	case <-e.gone:
+		return agent.ExecResult{}, e.why
+	}
+	rep := <-req.reply
+	return rep.res, rep.err
+}
+
+func (e *entry) run() {
+	for {
+		select {
+		case req := <-e.reqs:
+			if e.serve(req) {
+				e.exit(ErrDestroyed)
+				return
+			}
+		case <-e.mgr.closing:
+			e.exit(ErrShutdown)
+			return
 		}
-		e.set(StateExecuting)
-		e.emit(EventPrepared, StatePreparing, StateExecuting, nil)
 	}
-
-	res, err := e.mgr.backend.Exec(ctx, e.spec.Name, cmd)
-	e.endExec()
-	return res, err
 }
 
-// beginExec takes the sandbox off the idle clock and reports the stable state to
-// fall back to if preparing it fails.
-func (e *entry) beginExec() (State, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	if e.state == StateDestroyed {
-		return e.state, ErrDestroyed
+// serve answers one request, and reports whether the sandbox went with it.
+func (e *entry) serve(req request) (gone bool) {
+	switch req.kind {
+	case reqExec:
+		e.doExec(req)
+	case reqIdle:
+		e.doIdle(req)
+	case reqObserve:
+		e.doObserve(req)
+	case reqDestroy:
+		return e.doDestroy(req)
 	}
+	return false
+}
+
+// exit releases what the goroutine owns. The sandbox itself is deliberately left
+// alone: a manager shutting down is not a reason to stop anyone's work.
+func (e *entry) exit(why error) {
+	e.stopTimer()
+	e.why = why
+	close(e.gone)
+}
+
+// doExec runs one command, making the sandbox ready first if it is not already.
+// A destroyed sandbox never gets here: its goroutine is gone, so ask answers for
+// it.
+func (e *entry) doExec(req request) {
+	e.stopTimer()
+
 	prior := e.state
-	e.cancelIdle()
-	if prior == StateReady {
-		e.state = StateExecuting
+	if prior != StateReady {
+		e.commit(StatePreparing)
+		if err := e.mgr.backend.EnsureReady(req.ctx, e.spec); err != nil {
+			// Back to the stable state the failure left it in. That is never
+			// StateReady, which is the branch that skips preparing altogether, so
+			// there is no idle clock to restart here.
+			e.commit(prior)
+			e.emit(EventPrepareFailed, StatePreparing, prior, err)
+			req.reply <- reply{err: err}
+			return
+		}
+		e.commit(StateExecuting)
+		e.emit(EventPrepared, StatePreparing, StateExecuting, nil)
 	} else {
-		e.state = StatePreparing
+		e.commit(StateExecuting)
 	}
-	return prior, nil
-}
 
-// endExec puts the sandbox back on the idle clock. A command that failed still
-// counts as use: the sandbox is running either way, and the caller decides what
-// to do about the error.
-func (e *entry) endExec() {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.state = StateReady
+	res, err := e.mgr.backend.Exec(req.ctx, e.spec.Name, req.cmd)
+
+	// A command that failed still counts as use: the sandbox is running either
+	// way, and the caller decides what to do about the error.
 	e.lastExec = e.mgr.clock.Now()
+	e.commit(StateReady)
 	e.armIdle()
+	req.reply <- reply{res: res, err: err}
 }
 
-// idleReached is the idle deadline arriving. It waits for any command in flight
-// and then rechecks whether the deadline it was created for is still the current
-// one, so a sandbox used in the meantime is left alone.
-func (e *entry) idleReached(gen uint64) {
-	e.opMu.Lock()
-	defer e.opMu.Unlock()
+// doIdle is the idle deadline arriving. A deadline a later command replaced is
+// dropped rather than acted on: the sandbox has been used since, and its current
+// deadline has not come due.
+func (e *entry) doIdle(req request) {
+	defer func() { req.reply <- reply{} }()
 
-	if !e.beginStop(gen) {
+	if e.state != StateReady || !req.due.Equal(e.due) {
 		return
 	}
-	// Nobody is waiting on this: stopping idle compute is background work, so
-	// it gets the background context.
-	err := e.mgr.backend.Stop(context.Background(), e.spec.Name)
-	e.endStop(err)
-	if err != nil {
+	e.commit(StateStopping)
+
+	// Nobody is waiting on this: stopping idle compute is background work, so it
+	// gets the background context.
+	if err := e.mgr.backend.Stop(context.Background(), e.spec.Name); err != nil {
+		// Keep a sandbox that refused to stop usable, and give it one full idle
+		// window before trying again rather than retrying in a tight loop.
+		e.commit(StateReady)
+		e.armIdle()
 		e.emit(EventStopFailed, StateStopping, StateReady, err)
 		return
 	}
+	e.stopTimer()
+	e.commit(StateStopped)
 	e.emit(EventStopped, StateStopping, StateStopped, nil)
 }
 
-func (e *entry) beginStop(gen uint64) bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+func (e *entry) doDestroy(req request) (gone bool) {
+	prior := e.state
+	e.stopTimer()
+	e.commit(StateDestroying)
 
-	if e.state != StateReady || e.gen != gen || e.mgr.clock.Now().Before(e.dueAt) {
+	if err := e.mgr.backend.Destroy(req.ctx, e.spec.Name); err != nil {
+		e.commit(prior)
+		if prior == StateReady {
+			e.armIdle()
+		}
+		e.emit(EventDestroyFailed, StateDestroying, prior, err)
+		req.reply <- reply{err: err}
 		return false
 	}
-	e.state = StateStopping
-	e.timer = nil
+	e.commit(StateDestroyed)
+	e.emit(EventDestroyed, StateDestroying, StateDestroyed, nil)
+	req.reply <- reply{}
 	return true
 }
 
-// endStop keeps a sandbox that refused to stop usable, and gives it one full
-// idle window before trying again rather than retrying in a tight loop.
-func (e *entry) endStop(err error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	if err != nil {
-		e.state = StateReady
-		e.armIdle()
-		return
-	}
-	e.state = StateStopped
-	e.cancelIdle()
-}
-
-func (e *entry) destroy(ctx context.Context) error {
-	e.opMu.Lock()
-	defer e.opMu.Unlock()
-
-	prior, gone := e.beginDestroy()
-	if gone {
-		return nil
-	}
-	if err := e.mgr.backend.Destroy(ctx, e.spec.Name); err != nil {
-		e.restore(prior)
-		e.emit(EventDestroyFailed, StateDestroying, prior, err)
-		return err
-	}
-	e.set(StateDestroyed)
-	e.emit(EventDestroyed, StateDestroying, StateDestroyed, nil)
-	return nil
-}
-
-func (e *entry) beginDestroy() (prior State, gone bool) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	if e.state == StateDestroyed {
-		return e.state, true
-	}
-	prior = e.state
-	e.cancelIdle()
-	e.state = StateDestroying
-	return prior, false
-}
-
-// observe records what the backend was found to hold. A sandbox found running
+// doObserve records what the backend was found to hold. A sandbox found running
 // goes straight onto the idle clock, which is what bounds compute a crash left
 // behind.
-func (e *entry) observe(state State) {
-	e.opMu.Lock()
-	defer e.opMu.Unlock()
-
-	e.mu.Lock()
-	e.state = state
-	if state == StateReady {
+func (e *entry) doObserve(req request) {
+	e.commit(req.state)
+	if req.state == StateReady {
 		e.armIdle()
 	}
-	e.mu.Unlock()
-
-	e.emit(EventObserved, StateUnknown, state, nil)
+	e.emit(EventObserved, StateUnknown, req.state, nil)
+	req.reply <- reply{}
 }
 
-func (e *entry) set(state State) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.state = state
-}
-
-// restore returns a sandbox to the stable state a failed operation left it in.
-func (e *entry) restore(prior State) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.state = prior
-	if prior == StateReady {
-		e.armIdle()
-	}
-}
-
-// armIdle starts the countdown to releasing compute. Each arming gets a fresh
-// generation so the deadline it replaces cannot act when it fires. Callers hold
-// e.mu.
+// armIdle starts the countdown to releasing compute.
+//
+// The deadline is its own generation: a wakeup carries the deadline it was
+// scheduled for, so one that a later command replaced can be told from the
+// current one by comparing the two — no shared counter, and nothing to keep in
+// step. Waiting for the goroutine's answer is what makes a deadline synchronous:
+// when the wakeup returns, the decision has been made and any stop has happened.
 func (e *entry) armIdle() {
-	e.cancelIdle()
+	e.stopTimer()
 	if e.mgr.idle <= 0 {
 		return
 	}
-	e.gen++
-	gen := e.gen
-	e.dueAt = e.mgr.clock.Now().Add(e.mgr.idle)
-	e.timer = e.mgr.clock.AfterFunc(e.mgr.idle, func() { e.idleReached(gen) })
+	e.due = e.mgr.clock.Now().Add(e.mgr.idle)
+	e.publish()
+
+	due := e.due
+	e.timer = e.mgr.clock.AfterFunc(e.mgr.idle, func() {
+		e.ask(request{kind: reqIdle, due: due})
+	})
 }
 
-// cancelIdle drops any pending deadline. Callers hold e.mu.
-func (e *entry) cancelIdle() {
+// stopTimer takes the sandbox off the idle clock, dropping any pending wakeup
+// and the deadline it was for.
+func (e *entry) stopTimer() {
 	if e.timer != nil {
 		e.timer.Stop()
 		e.timer = nil
 	}
-	e.gen++
-	e.dueAt = time.Time{}
+	e.due = time.Time{}
+	e.publish()
+}
+
+// commit records a state the sandbox has reached and publishes it for Inspect.
+func (e *entry) commit(state State) {
+	e.state = state
+	e.publish()
+}
+
+func (e *entry) publish() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.snap = Info{
+		Name:     e.spec.Name,
+		State:    e.state,
+		Image:    e.spec.Image,
+		LastExec: e.lastExec,
+		DueAt:    e.due,
+	}
 }
 
 func (e *entry) info() Info {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return Info{
-		Name:     e.spec.Name,
-		State:    e.state,
-		Image:    e.spec.Image,
-		LastExec: e.lastExec,
-		DueAt:    e.dueAt,
-	}
+	return e.snap
 }

@@ -35,8 +35,8 @@ flowchart TB
 
     subgraph mgr["sandbox package — policy"]
         handle["handle<br/><i>handle.go</i>"]
-        manager["Manager<br/><i>manager.go</i>"]
-        entry["entry (one per name)<br/><i>manager.go:186</i>"]
+        manager["Manager<br/>name lookup, Close<br/><i>manager.go</i>"]
+        entry["entry + its goroutine<br/>one per name<br/><i>manager.go:276</i>"]
         clock["Clock / Timer<br/><i>clock.go</i>"]
         obs["Event / observer<br/><i>observer.go</i>"]
     end
@@ -93,21 +93,33 @@ classDiagram
         -clock Clock
         -idle Duration
         -observer func(Event)
+        -closing chan
         -mu Mutex
         -entries map~string, entry~
         +Open(spec) Sandbox, error
         +Destroy(ctx, name) error
+        +Close() error
         +Inspect() []Info
         +Reconcile(ctx) ReconcileReport, error
     }
     class entry {
         -spec SandboxSpec
-        -opMu Mutex
-        -mu Mutex
-        -state State
-        -gen uint64
-        -timer Timer
-        -lastExec, dueAt Time
+        -reqs chan request
+        -gone chan, why error
+        -state State «owned by run»
+        -due, lastExec Time «owned by run»
+        -timer Timer «owned by run»
+        -mu Mutex, snap Info
+        -run() loop
+        -ask(request) result
+    }
+    class request {
+        +kind reqKind
+        +ctx Context
+        +cmd Command
+        +state State
+        +due Time
+        +reply chan reply
     }
     class handle {
         -entry *entry
@@ -121,6 +133,7 @@ classDiagram
     Backend <|.. DockerBackend
     Manager "1" --> "*" entry
     handle --> entry
+    entry ..> request : receives
     Manager --> Backend
 ```
 
@@ -180,104 +193,139 @@ stateDiagram-v2
     end note
 ```
 
-Resting vs. in-flight is not decoration — `Inspect` reads committed state only
-(`manager.go:94`), so `preparing` / `executing` are what an operator sees while a
+Resting vs. in-flight is not decoration — `Inspect` reads published state only
+(`manager.go:127`), so `preparing` / `executing` are what an operator sees while a
 backend call is outstanding.
 
-## 5. Concurrency: two locks, three rules
+`Destroyed` is also where the sandbox's goroutine exits: it closes `gone` with
+`why = ErrDestroyed`, which is how handles still bound to the name get their
+error without anything having to stay alive to tell them (`manager.go:359`).
 
-`entry` holds two mutexes with sharply different scopes (`manager.go:186-202`).
+## 5. Concurrency: one goroutine per sandbox
+
+Each `entry` is an actor: a goroutine that owns the sandbox's lifecycle state
+outright and takes one request at a time (`manager.go:276-300`). Nothing about
+the lifecycle is shared, so there is no lock discipline to get wrong.
 
 ```mermaid
 flowchart LR
     subgraph e1["entry &quot;alpha&quot;"]
-        op1["opMu — held across backend calls<br/>serializes exec / stop / destroy"]
-        st1["mu — guards state, gen, timer<br/>never held across a backend call"]
+        r1["reqs (unbuffered)"] --> g1["run() goroutine<br/>owns state, due, timer"]
+        g1 -.publishes.-> s1["snap (Info)"]
     end
     subgraph e2["entry &quot;beta&quot;"]
-        op2["opMu"]
-        st2["mu"]
+        r2["reqs"] --> g2["run() goroutine"]
+        g2 -.publishes.-> s2["snap"]
     end
     mmu["Manager.mu — guards the name map only"]
 
-    A["Exec on alpha"] --> op1
-    B["Exec on beta"] --> op2
+    A["handle.Exec"] --> r1
+    B["handle.Exec"] --> r2
+    T["idle timer fires"] --> r1
+    D["Manager.Destroy"] --> r1
     C["Inspect()"] --> mmu
-    C -.reads.-> st1
-    C -.reads.-> st2
-    D["Open / Destroy"] --> mmu
+    C -.reads.-> s1
+    C -.reads.-> s2
+    X["Manager.Close"] --> CL["closing (closed once)"]
+    CL --> g1
+    CL --> g2
 ```
 
-The three rules to hold the line on in review:
+The four rules to hold the line on in review:
 
-1. **`Manager.mu` guards the lookup and nothing else** (`manager.go:35`) — a slow
-   backend call on one sandbox never blocks opening or inspecting another.
-   Covered by `TestSandboxesRunIndependently`, `TestInspectStaysResponsiveDuringCommand`.
-2. **`opMu` is held across backend calls** — this is the *only* thing serializing
-   work per sandbox, and also what orders events. Covered by
+1. **All lifecycle state is goroutine-owned** — `state`, `due`, `lastExec` and
+   `timer` are touched only from `run` and the `do*` methods it calls
+   (`manager.go:291-294`). A new operation is a new `reqKind` and a new `do*`
+   method, never a new lock.
+2. **`reqs` is unbuffered on purpose** (`manager.go:282`) — a delivered request is
+   one the goroutine has *taken*, so `ask` can wait on the reply with nothing to
+   fall back on. This is also what serializes work per sandbox. Covered by
    `TestCommandsSerializePerSandbox`, `TestDestroyWaitsForRunningCommand`.
-3. **`mu` is never held across a backend call** — hence the `begin*` / `end*`
-   pairs (`beginExec`/`endExec`, `beginStop`/`endStop`, `beginDestroy`). Any new
-   operation must follow the same shape.
+3. **Every request the goroutine takes is answered exactly once** — the invariant
+   that makes `ask` (`manager.go:316`) safe. `doIdle` uses a deferred reply so no
+   early return can break it.
+4. **`Manager.mu` guards the lookup and nothing else** (`manager.go:42`) — a slow
+   backend call on one sandbox never blocks opening or inspecting another. Covered
+   by `TestSandboxesRunIndependently`.
+
+One mutex survives, and it guards one thing: the `Info` snapshot `Inspect` reads
+(`manager.go:298`). `run` is its only writer, republishing after every transition
+and never holding it across a backend call — which is what keeps `Inspect`
+responsive (`TestInspectStaysResponsiveDuringCommand`).
+
+Shutdown is the other half of owning a goroutine. `Manager.Close`
+(`manager.go:111`) closes `closing`, which every `run` loop selects on, then waits
+for each goroutine's `gone` channel. In-flight work finishes first — `Close` is a
+drain, not a disconnect — and the sandboxes themselves are deliberately left
+running for the next process to `Reconcile`.
 
 ## 6. The idle policy
 
 A sandbox goes on the idle clock whenever it comes to rest in `Ready`. The
-subtlety is the **generation counter**: a fired timer must not stop a sandbox
-that was used while the timer was in flight.
+deadline **is its own generation**: a wakeup carries the `due` it was scheduled
+for, and the goroutine compares that against the deadline it currently holds
+(`armIdle`, `manager.go:464`). No counter, nothing to keep in step.
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant C as caller
-    participant E as entry
+    participant R as run() goroutine
     participant K as Clock
     participant B as Backend
 
-    C->>E: Exec (#1)
-    E->>E: beginExec — cancelIdle, state=Executing
-    E->>B: Exec
-    B-->>E: result
-    E->>E: endExec — state=Ready, armIdle (gen=g1)
-    E->>K: AfterFunc(idle) → idleReached(g1)
-    C-->>E: result
+    C->>R: reqExec (unbuffered send)
+    R->>R: stopTimer — off the idle clock
+    R->>B: Exec
+    B-->>R: result
+    R->>R: state=Ready, armIdle → due=t1
+    R->>K: AfterFunc(idle) → wake(t1)
+    R-->>C: reply
 
     Note over K: idle window passes
 
-    K->>E: idleReached(g1)
-    E->>E: opMu.Lock (waits for any command)
-    E->>E: beginStop(g1): state==Ready? gen==g1? now>=dueAt?
-    E->>B: Stop(context.Background())
-    B-->>E: nil
-    E->>E: endStop — state=Stopped, cancelIdle
-    E->>C: Event{Stopped}
+    K->>R: reqIdle{due: t1}
+    R->>R: state==Ready? due==t1? ✓
+    R->>B: Stop(context.Background())
+    B-->>R: nil
+    R->>R: state=Stopped, stopTimer
+    R->>C: Event{Stopped}
+    R-->>K: reply (the wakeup returns)
 ```
 
-And the stale case, which is the reason `gen` exists at all:
+The stale case needs no special machinery — the deadline comparison is the whole
+guard:
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant K as Clock timer (gen g1)
+    participant K as timer for t1
     participant C as caller
-    participant E as entry
+    participant R as run() goroutine
 
-    Note over K: fires, goroutine scheduled
-    C->>E: Exec — takes opMu, armIdle bumps gen to g2
-    K->>E: idleReached(g1) blocks on opMu
-    C-->>E: command done, opMu released
-    K->>E: beginStop(g1) → gen is g2 → false
-    Note over K: returns silently, no Stop, no event
+    Note over K: fires, wake(t1) sends reqIdle
+    C->>R: reqExec (arrives first)
+    R->>R: armIdle → due=t2
+    R-->>C: reply
+    K->>R: reqIdle{due: t1}
+    R->>R: due is t2, not t1 → drop
+    Note over R: no Stop, no event, no state change
 ```
 
-Three consequences encoded in the code:
+Four consequences encoded in the code:
 
-- an idle stop uses `context.Background()` — nobody is waiting on it
-  (`manager.go:266`);
+- **the wakeup waits for its answer** (`manager.go:464-476`). `time.AfterFunc`
+  runs the callback on its own goroutine, so blocking there costs nothing — and it
+  means a deadline is synchronous: when the callback returns, the decision has been
+  made and any stop has happened. That is also what keeps `fakeClock.Advance`
+  assertable without polling.
+- an idle stop uses `context.Background()` — nobody is waiting on the sandbox's
+  behalf (`manager.go:402-423`);
 - a failed stop leaves the sandbox in `Ready` and gives it **one full idle
-  window** before retrying, rather than a tight loop (`endStop`, `manager.go:289`);
-- `WithIdleTimeout(0)` (or negative) disables stopping entirely (`armIdle`,
-  `manager.go:371`).
+  window** before trying again, rather than a tight loop
+  (`TestStopFailureRetriesAfterOneWindow`);
+- `WithIdleTimeout(0)` (or negative) disables stopping entirely: `armIdle` returns
+  before scheduling anything, so there is no timer at all.
 
 ## 7. Reconciliation after a restart
 
@@ -327,11 +375,11 @@ was left*, which is where the next command starts from.
 The callback contract (`observer.go:74-88`) is the part most likely to be misused
 by application code:
 
-- it runs on the transitioning goroutine, after commit, with **no state or map
-  lock held** — so it may call `Inspect`;
-- but the sandbox's **`opMu` is still held, deliberately**, which is what orders
-  events per sandbox. So an observer must **not** call `Exec` or `Destroy` on the
-  sandbox it is being told about — that self-deadlocks;
+- it runs on the sandbox's own goroutine, after the transition is published and
+  with **no lock held** — so it may call `Inspect`;
+- that same goroutine is what orders events per sandbox, so an observer must
+  **not** call `Exec` or `Destroy` on the sandbox it is being told about: the
+  answer would have to come from the goroutine currently running the observer;
 - it must not do slow work: an idle stop waits for it, and a prepare is on the
   path of the command that triggered it.
 
@@ -445,7 +493,8 @@ posture as the Docker name regex.
 ```mermaid
 flowchart TB
     subgraph unit["always on — make test (-race)"]
-        M["manager_test.go 504L<br/>fakeBackend + fakeClock"]
+        M["manager_test.go 508L<br/>fakeBackend + fakeClock"]
+        CT["close_test.go 134L<br/>shutdown + drain"]
         O["observer_test.go 349L<br/>recorder"]
         RC["reconcile_test.go 142L"]
         L["local_test.go 274L<br/>real files in t.TempDir()"]
@@ -456,6 +505,7 @@ flowchart TB
         I["docker/integration_test.go<br/>real daemon, skipped without one"]
     end
 
+    CT --> FB
     M --> FB["fakes_test.go:<br/>call history, injectable errors,<br/>gate channels for concurrency"]
     DB --> FD["docker/fakes_test.go:<br/>container/image state, scripted execs,<br/>failOn(method), recorded StopOptions"]
 ```
@@ -463,7 +513,10 @@ flowchart TB
 The two seams that make this testable are worth protecting:
 
 - **`Clock`** (`clock.go`) — the idle policy is tested by *advancing time and
-  asserting*, never by sleeping. `fakeClock.Advance` runs due timers.
+  asserting*, never by sleeping. `fakeClock.Advance` runs due timers on the calling
+  goroutine, and because a wakeup waits for the sandbox's answer (§6), `Advance`
+  returns only once the resulting stop has actually happened. That is what lets
+  ~15 idle-policy assertions be plain reads with no polling.
 - **`daemon`** (`docker/backend.go:65`) — the smallest slice of the Docker SDK the
   backend needs, so the Docker backend has real unit tests instead of only
   integration ones.
@@ -474,42 +527,46 @@ Tests are named after behaviour, not methods
 matches the project's TDD rule and means the suite reads as the specification of
 the contracts in §3.
 
+Because the tests name behaviour and not methods, the move to one-goroutine-per-
+sandbox (§5) changed **no test assertion**: `manager_test.go` grew by the four
+lines that register `Manager.Close` on every test's cleanup, so a leaked sandbox
+goroutine now shows up as a hanging test rather than as nothing at all.
+
 ## 12. Notes for the reviewer
 
 Verified observations, roughly in descending order of how much they'd cost later.
 
-1. **No `Manager.Close` / shutdown path.** There is no way to drain or cancel
-   armed idle timers, and an idle stop runs on `context.Background()` with no
-   handle to wait on (`manager.go:266`) — a process that exits mid-stop leaves
-   the container running until the next `Reconcile` re-arms it. Nothing releases
-   the backend either: `docker.Backend.Close()` exists (`backend.go:126`) but the
-   manager never calls it and has no lifecycle of its own.
+1. **No resource limits or network policy in the Docker backend.** `create` passes
+   `&container.HostConfig{}` — default network (full egress), no memory or CPU cap,
+   no pids limit, no read-only paths, and whatever user the image defaults to
+   (usually root). For a component called "sandbox" running model-authored
+   commands, the absent knobs are worth an explicit decision + doc line, even if
+   the answer is "later".
 2. **`WithKeepalive`'s doc comment is stale.** It says "the default,
-   `sleep infinity`, is not in every image", but the default is
-   `tail -f /dev/null` (`defaultKeepalive()`), and the package comment explains at
-   length *why* it isn't `sleep infinity`. The comment contradicts the code two
-   functions above it.
-3. **No resource limits or network policy in the Docker backend.** `create`
-   passes `&container.HostConfig{}` — default network (full egress), no memory or
-   CPU cap, no pids limit, no read-only paths, and whatever user the image
-   defaults to (usually root). For a component called
-   "sandbox" running model-authored commands, the absent knobs are worth an
-   explicit decision + doc line, even if the answer is "later".
-4. **Exec output is fully buffered in memory**, in both backends
-   (`bytes.Buffer` in `executor.go` and `local.go`). A command that prints a
-   gigabyte takes the process with it. No cap, no truncation, no streaming.
-5. **`armIdle` bumps `gen` twice** — it calls `cancelIdle` (which bumps) and then
-   bumps again (`manager.go:369-379`). Harmless, since only inequality matters,
-   but it reads as if one of the two increments is a leftover.
+   `sleep infinity`, is not in every image", but the default is `tail -f /dev/null`
+   (`defaultKeepalive()`), and the package comment explains at length *why* it
+   isn't `sleep infinity`. The comment contradicts the code two functions above it.
+3. **Exec output is fully buffered in memory**, in both backends (`bytes.Buffer` in
+   `executor.go` and `local.go`). A command that prints a gigabyte takes the
+   process with it. No cap, no truncation, no streaming.
+4. **`Close` is as slow as the slowest backend call in flight.** It waits for every
+   sandbox goroutine to reach its `select`, so a daemon that hangs in `Stop` or
+   `Exec` hangs shutdown with it. There is no context or timeout on `Close`
+   (`manager.go:111`). Deliberate — a drain that gives up is not a drain — but a
+   caller that needs a bounded shutdown has nothing to ask for.
+5. **One goroutine per live sandbox**, spawned in `adopt` under `Manager.mu`
+   (`manager.go:218`). Cheap, and it is what removed the lock discipline, but it
+   does mean the manager now has a resource to release where before it had none —
+   hence #4 and hence `Close` existing at all.
 6. **`Backend.container` as a method name** (`docker/backend.go:276`) sits next to
-   the imported `container` package used heavily in the same file. It resolves
-   fine — methods aren't bare identifiers — but it's a coin-flip of confusion for
-   the next reader, and it has exactly one caller (`containerName`).
-7. **A second `Open` with a different `Image` is silently ignored.** First spec
-   for a name wins (`entryFor`/`adopt`, `manager.go:154-167`). This is documented
-   on `agent.SandboxSpec` and is the right semantics, but it is silent — no event,
-   no error — so a caller who bumped the image and sees the old one has nothing to
-   go on.
+   the imported `container` package used heavily in the same file. It resolves fine
+   — methods aren't bare identifiers — but it's a coin-flip of confusion for the
+   next reader, and it has exactly one caller (`containerName`).
+7. **A second `Open` with a different `Image` is silently ignored.** First spec for
+   a name wins (`entryFor`/`adopt`, `manager.go:199-220`). This is documented on
+   `agent.SandboxSpec` and is the right semantics, but it is silent — no event, no
+   error — so a caller who bumped the image and sees the old one has nothing to go
+   on.
 8. **`Reconcile` is opt-in and undocumented outside the code.** Nothing in
    `README.md`/`STACK.md` tells an application author that they must call it at
    startup, and skipping it means leaked compute stays leaked. Worth a line in the
@@ -520,6 +577,31 @@ Verified observations, roughly in descending order of how much they'd cost later
 10. **`handle` has no reference counting** — `Close` sets a flag and nothing else,
     by design (`handle.go:15,28-31`). So nothing anywhere knows how many callers
     are live; idle time is the only signal. That's a deliberate simplification and
-    the tests pin it (`TestCloseIsLifecycleNeutral`,
-    `TestHandlesShareOneSandbox`) — just be aware there is no "last user left"
-    hook to hang anything on.
+    the tests pin it (`TestCloseIsLifecycleNeutral`, `TestHandlesShareOneSandbox`)
+    — just be aware there is no "last user left" hook to hang anything on.
+
+## Appendix: what the actor refactor cost and bought
+
+Honest accounting, since the goroutine-per-sandbox rewrite (§5) is the newest and
+least-settled thing here.
+
+**Gone:** `opMu` and the state mutex's lifecycle duties; the `gen` counter; and
+eight helper methods (`beginExec`/`endExec`, `beginStop`/`endStop`,
+`beginDestroy`, `restore`, `set`, `cancelIdle`) that existed only to avoid holding
+a lock across a backend call. The four `do*` methods that replaced them read
+top-to-bottom.
+
+**Gained:** `Manager.Close` — a real shutdown path, verified leak-free (150
+sandboxes across 50 managers, goroutine count unchanged). No wasted timer wakeups
+blocking on a lock. And the guard on a stale deadline is now one comparison
+against a value `Inspect` already reports, instead of a counter nothing else uses.
+
+**Cost:** `manager.go` went from 292 to 356 lines of code (comments and blanks
+excluded) — the `request`/`reply`/`ask`/`run`/`serve` plumbing is more lines than
+the lock dance it replaced. So this refactor did **not** make the file smaller. It
+moved the complexity from "rules you must not break" to "plumbing you can read",
+and added a goroutine per sandbox. Whether that is the right trade is a judgement
+call, and it is the main thing to push back on if you disagree.
+
+**Unchanged:** the `Clock` interface, `fakes_test.go`, and every test assertion in
+the suite — including the live Docker/Podman integration tests.

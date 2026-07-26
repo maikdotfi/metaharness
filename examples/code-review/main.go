@@ -71,6 +71,7 @@ func run(ctx context.Context, modelID, workdir, prompt string, think bool, effor
 		root = "."
 	}
 	sandboxes := sandbox.NewManager(sandbox.LocalBackend{Root: root})
+	defer sandboxes.Close()
 
 	a := agent.New(systemPrompt,
 		agent.WithModel(m),

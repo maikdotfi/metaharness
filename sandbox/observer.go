@@ -71,17 +71,17 @@ func (t EventType) String() string {
 // WithObserver sets the function called for each committed transition. There is
 // one observer; setting it again replaces it.
 //
-// A callback runs on the goroutine that made the transition, after it has been
-// committed and with no state or map lock held, so it may call Inspect or read
-// anything else the manager knows. Two things follow from that:
+// A callback runs on the sandbox's own goroutine, after the transition has been
+// published and with no lock held, so it may call Inspect or read anything else
+// the manager knows. Two things follow from that:
 //
 //   - it is not the place for slow work. An idle stop is background work and
 //     waits for it; a prepare is on the path of the command that triggered it.
 //     Anything expensive belongs on a channel the observer sends to.
-//   - the sandbox's operation lock is still held, deliberately: it is what makes
-//     events for one sandbox arrive in the order its transitions happened. An
-//     observer must therefore not call Exec or Destroy on the sandbox it is
-//     being told about, which would wait for a lock its own caller holds.
+//   - that one goroutine is also what makes events for one sandbox arrive in the
+//     order its transitions happened. An observer must therefore not call Exec or
+//     Destroy on the sandbox it is being told about: the answer would have to come
+//     from the goroutine that is currently running the observer.
 //
 // Observers cannot change what happened. There is no error to return, and
 // nothing is retried on their behalf.
@@ -89,8 +89,8 @@ func WithObserver(fn func(Event)) Option {
 	return func(m *Manager) { m.observer = fn }
 }
 
-// emit tells the observer about a committed transition. Callers must hold no
-// state lock.
+// emit tells the observer about a published transition. It runs on the sandbox's
+// goroutine, holding no lock.
 func (e *entry) emit(t EventType, from, to State, err error) {
 	if e.mgr.observer == nil {
 		return

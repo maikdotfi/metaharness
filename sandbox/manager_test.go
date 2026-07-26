@@ -20,7 +20,11 @@ func newTestManager(t *testing.T, opts ...Option) (*Manager, *fakeBackend, *fake
 	backend := newFakeBackend()
 	clock := newFakeClock()
 	opts = append([]Option{WithClock(clock), WithIdleTimeout(testIdle)}, opts...)
-	return NewManager(backend, opts...), backend, clock
+	m := NewManager(backend, opts...)
+	// Every test shuts its manager down, so a leaked sandbox goroutine shows up as
+	// a hanging test rather than as nothing at all.
+	t.Cleanup(func() { m.Close() })
+	return m, backend, clock
 }
 
 func mustOpen(t *testing.T, m *Manager, name string) agent.Sandbox {
