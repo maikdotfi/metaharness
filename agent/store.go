@@ -7,6 +7,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
+	"time"
 
 	"charm.land/fantasy"
 )
@@ -16,6 +19,23 @@ var ErrNotFound = errors.New("session not found")
 type SessionStore interface {
 	Save(ctx context.Context, s *Session) error
 	Load(ctx context.Context, id string) (*Session, error)
+}
+
+// SessionLister is an optional store capability for discovering resumable
+// sessions.
+type SessionLister interface {
+	List(ctx context.Context, limit int) ([]SessionInfo, error)
+}
+
+// SessionInfo is the summary needed to choose a session without loading its
+// transcript.
+type SessionInfo struct {
+	ID        string
+	Model     string
+	Status    Status
+	Messages  int
+	Usage     fantasy.Usage
+	UpdatedAt time.Time
 }
 
 // JSONLStore writes <dir>/<id>.jsonl: line 1 = meta, each later line = one message.
@@ -68,7 +88,10 @@ type record struct {
 	Message *fantasy.Message `json:"message,omitempty"`
 }
 
-func (s *JSONLStore) Save(_ context.Context, sess *Session) error {
+func (s *JSONLStore) Save(ctx context.Context, sess *Session) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	tmp, err := os.CreateTemp(s.dir, sess.ID+".*.tmp")
 	if err != nil {
 		return err
@@ -86,7 +109,13 @@ func (s *JSONLStore) Save(_ context.Context, sess *Session) error {
 		if writeErr != nil {
 			break
 		}
+		if writeErr = ctx.Err(); writeErr != nil {
+			break
+		}
 		writeErr = enc.Encode(record{Kind: "message", Message: &sess.Messages[i]})
+	}
+	if writeErr == nil {
+		writeErr = ctx.Err()
 	}
 	if writeErr == nil {
 		writeErr = w.Flush()
@@ -98,10 +127,16 @@ func (s *JSONLStore) Save(_ context.Context, sess *Session) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return os.Rename(tmpName, s.path(sess.ID)) // atomic
 }
 
-func (s *JSONLStore) Load(_ context.Context, id string) (*Session, error) {
+func (s *JSONLStore) Load(ctx context.Context, id string) (*Session, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	f, err := os.Open(s.path(id))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrNotFound
@@ -116,6 +151,9 @@ func (s *JSONLStore) Load(_ context.Context, id string) (*Session, error) {
 	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024) // tool output can be big
 
 	for sc.Scan() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if len(sc.Bytes()) == 0 {
 			continue
 		}
@@ -139,4 +177,55 @@ func (s *JSONLStore) Load(_ context.Context, id string) (*Session, error) {
 		}
 	}
 	return sess, sc.Err()
+}
+
+// List returns the most recently saved sessions first.
+func (s *JSONLStore) List(ctx context.Context, limit int) ([]SessionInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		return []SessionInfo{}, nil
+	}
+
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, err
+	}
+	infos := make([]SessionInfo, 0, min(limit, len(entries)))
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), ".jsonl")
+		sess, err := s.Load(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		fileInfo, err := entry.Info()
+		if err != nil {
+			return nil, err
+		}
+		infos = append(infos, SessionInfo{
+			ID:        sess.ID,
+			Model:     sess.Model,
+			Status:    sess.Status,
+			Messages:  len(sess.Messages),
+			Usage:     sess.Usage,
+			UpdatedAt: fileInfo.ModTime(),
+		})
+	}
+	sort.Slice(infos, func(i, j int) bool {
+		if infos[i].UpdatedAt.Equal(infos[j].UpdatedAt) {
+			return infos[i].ID < infos[j].ID
+		}
+		return infos[i].UpdatedAt.After(infos[j].UpdatedAt)
+	})
+	if len(infos) > limit {
+		infos = infos[:limit]
+	}
+	return infos, nil
 }

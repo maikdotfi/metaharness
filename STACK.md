@@ -11,16 +11,21 @@
 - [github.com/docker/docker/client](https://pkg.go.dev/github.com/docker/docker/client) -
   the Docker daemon SDK, used only by `sandbox/docker`. Nothing else imports it,
   and an application that sticks to the local sandbox never talks to a daemon.
+- [turso.tech/database/tursogo](https://pkg.go.dev/turso.tech/database/tursogo)
+  - optional embedded, CGO-free session database.
 
 ## Layout
 
 ```
 agent/                    agent loop, sessions, store interface, tool plumbing
+agentdb/turso/            embedded Turso session store and schema migrations
+bridge/telegram/          personal Telegram long-polling bridge
 model/                    model client abstractions and fantasy adapter
 sandbox/                  sandbox lifecycle manager and the local backend
 sandbox/docker/           Docker backend: one long-lived container per sandbox
 tools/                    built-in tools
 skills/                   bundled skill prompts
+testutils/                reusable fakes and backend behavior suites
 examples/                 sample agents and target projects
 Makefile                  test targets
 ```
@@ -38,8 +43,9 @@ Meta Harness is not executable by itself. Applications import the library,
 choose a model, tools, sandbox, and session store, then assemble their own
 agent.
 
-Persistence is moving toward an agent database abstraction. See
-[`STORE-PLAN.md`](./STORE-PLAN.md) for the intended storage direction.
+Persistence is opt-in. `agent.JSONLStore` is the dependency-free filesystem
+backend; `agentdb/turso.Store` is the embedded database backend. Both implement
+the narrow `agent.SessionStore` and optional `agent.SessionLister` interfaces.
 
 ## Logging
 
