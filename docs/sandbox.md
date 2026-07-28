@@ -9,6 +9,9 @@ output. Every frame is real code, quoted from the file it lives in.
 If you only read one section, read §2 — it answers "who owns the sandbox, and for
 how long?", and the answer is the design in miniature.
 
+This subsystem was built twice, and the second version is where the repo's API
+rules come from: [api-design.md](./api-design.md) is that redesign generalised.
+
 ---
 
 ## 1. The shape, before the details
