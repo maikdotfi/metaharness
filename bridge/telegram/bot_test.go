@@ -115,13 +115,17 @@ func newTestBot(t *testing.T, m model.ModelClient, showThinking bool) (*personal
 	t.Helper()
 	a := agent.New("test system prompt",
 		agent.WithModel(m),
-		agent.WithSandbox(testutils.NopFactory{}),
 		agent.WithTools(agent.Adapt(tools.Bash{})),
 	)
 	var n int
-	factory := func() *agent.Session {
+	factory := func() (*agent.Session, error) {
 		n++
-		return &agent.Session{ID: fmt.Sprintf("sess_%d", n), Model: "test-model", Status: agent.StatusActive}
+		box := &testutils.FakeSandbox{SandboxName: "work"}
+		return agent.NewSession(fmt.Sprintf("sess_%d", n), "test-model", box), nil
+	}
+	first, err := factory()
+	if err != nil {
+		t.Fatalf("session factory: %v", err)
 	}
 	api := &fakeAPI{}
 	pb := &personalBot{
@@ -132,7 +136,7 @@ func newTestBot(t *testing.T, m model.ModelClient, showThinking bool) (*personal
 		showThinking: showThinking,
 		editGap:      0,
 		now:          time.Now,
-		current:      factory(),
+		current:      first,
 	}
 	return pb, api
 }

@@ -2,27 +2,21 @@ package agent
 
 import "github.com/maikdotfi/metaharness/model"
 
+// Agent is the reusable half of a turn: the model, the tools, the prompt and the
+// store. It holds nothing per-task and nothing per-sandbox, so one agent serves
+// as many sessions at once as there are tasks — each of them bringing the
+// sandbox it runs in.
 type Agent struct {
 	SystemPrompt string
 	Tools        map[string]Tool
 	Model        model.ModelClient
 	Store        SessionStore
-	Newbox       SandboxFactory
-
-	// Sandbox is the sandbox new sessions run in. A session that already names
-	// one keeps it.
-	Sandbox SandboxSpec
 }
 
 type Option func(*Agent)
 
 func WithModel(m model.ModelClient) Option { return func(a *Agent) { a.Model = m } }
 func WithStore(s SessionStore) Option      { return func(a *Agent) { a.Store = s } }
-func WithSandbox(f SandboxFactory) Option  { return func(a *Agent) { a.Newbox = f } }
-
-// WithSandboxSpec names the sandbox new sessions run in. Which sandbox to use
-// is the application's choice, never the library's.
-func WithSandboxSpec(s SandboxSpec) Option { return func(a *Agent) { a.Sandbox = s } }
 
 func WithTools(ts ...Tool) Option {
 	return func(a *Agent) {

@@ -30,6 +30,9 @@ type fakeBackend struct {
 	stopErr    error
 	destroyErr error
 	listErr    error
+	closeErr   error
+
+	closed int // times Close was called
 
 	// hook runs inside Exec while the command counts as in flight, holding no
 	// lock. Tests use it to hold a command open.
@@ -54,7 +57,7 @@ func newFakeBackend() *fakeBackend {
 
 var _ Backend = (*fakeBackend)(nil)
 
-func (b *fakeBackend) EnsureReady(_ context.Context, spec agent.SandboxSpec) error {
+func (b *fakeBackend) EnsureReady(_ context.Context, spec Spec) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -153,6 +156,24 @@ func (b *fakeBackend) List(context.Context) ([]BackendSandbox, error) {
 	return found, nil
 }
 
+// Close records that the manager gave the backend back. It deliberately leaves
+// the sandboxes alone, like a real backend must: dropping a connection is not a
+// lifecycle event.
+func (b *fakeBackend) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.calls = append(b.calls, "Close")
+	b.closed++
+	return b.closeErr
+}
+
+func (b *fakeBackend) closes() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.closed
+}
+
 // create seeds a sandbox as if an earlier process had left it behind.
 func (b *fakeBackend) create(name, image string, running bool) {
 	b.mu.Lock()
@@ -183,6 +204,17 @@ func (b *fakeBackend) alive(name string) (exists, running bool) {
 	defer b.mu.Unlock()
 	box, ok := b.boxes[name]
 	return ok, ok && box.running
+}
+
+// imageOf reports what the named sandbox was created from, so a test can tell
+// which image actually reached the backend.
+func (b *fakeBackend) imageOf(name string) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if box := b.boxes[name]; box != nil {
+		return box.image
+	}
+	return ""
 }
 
 func (b *fakeBackend) observed(call string) int {

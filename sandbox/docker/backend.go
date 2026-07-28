@@ -25,7 +25,6 @@ import (
 	"github.com/docker/docker/client"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
-	"github.com/maikdotfi/metaharness/agent"
 	"github.com/maikdotfi/metaharness/sandbox"
 )
 
@@ -103,6 +102,25 @@ func WithKeepalive(cmd []string) Option {
 	return func(b *Backend) { b.keepalive = slices.Clone(cmd) }
 }
 
+// Kind is the name this backend answers to in sandbox.New. Importing this
+// package for its side effect is what makes that name available:
+//
+//	import _ "github.com/maikdotfi/metaharness/sandbox/docker"
+//
+// which is also the only place an application that chooses its backend by name
+// mentions Docker at all — and the only thing to delete to be rid of the SDK.
+const Kind = "docker"
+
+func init() {
+	sandbox.Register(Kind, func(sandbox.Config) (sandbox.Backend, error) {
+		// Config.Root is deliberately ignored: a sandbox here is a container's own
+		// writable layer, so there is no host directory to put anything under. The
+		// in-container workdir is DefaultWorkdir, which is not a host path and not
+		// the same idea.
+		return New()
+	})
+}
+
 // New connects to the Docker daemon described by the environment (DOCKER_HOST
 // and friends). Close releases that connection.
 func New(opts ...Option) (*Backend, error) {
@@ -122,13 +140,14 @@ func newBackend(d daemon, opts ...Option) *Backend {
 }
 
 // Close releases the connection to the daemon. It does nothing to the
-// sandboxes, which is the point of them.
+// sandboxes, which is the point of them. The Manager this backend was handed to
+// calls it during its own shutdown.
 func (b *Backend) Close() error { return b.daemon.Close() }
 
 // EnsureReady makes the named sandbox exist and run. A sandbox that is already
 // there is started, never recreated: recreating it would take its filesystem
 // with it.
-func (b *Backend) EnsureReady(ctx context.Context, spec agent.SandboxSpec) error {
+func (b *Backend) EnsureReady(ctx context.Context, spec sandbox.Spec) error {
 	name, err := b.containerName(spec.Name)
 	if err != nil {
 		return err
@@ -149,7 +168,7 @@ func (b *Backend) EnsureReady(ctx context.Context, spec agent.SandboxSpec) error
 }
 
 // create builds the container a sandbox lives in, acquiring its image first.
-func (b *Backend) create(ctx context.Context, name string, spec agent.SandboxSpec) error {
+func (b *Backend) create(ctx context.Context, name string, spec sandbox.Spec) error {
 	if spec.Image == "" {
 		return fmt.Errorf("sandbox/docker: sandbox %q does not exist and the spec has no image to create it from", spec.Name)
 	}

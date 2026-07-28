@@ -35,7 +35,31 @@ type sessionMeta struct {
 	Model   string        `json:"model"`
 	Status  Status        `json:"status"`
 	Usage   fantasy.Usage `json:"usage"`
-	Sandbox SandboxSpec   `json:"sandbox"`
+	Sandbox sandboxName   `json:"sandbox"`
+}
+
+// sandboxName is the sandbox a session recorded. Only the name is ever written:
+// an image, a backend, a daemon address are this process's configuration, and
+// the process that resumes the session is free to differ on all of them — the
+// name is the only part that still means the same thing.
+type sandboxName string
+
+// UnmarshalJSON also reads the object older sessions recorded, {"name":…,
+// "image":…}, keeping the name and dropping the rest.
+func (n *sandboxName) UnmarshalJSON(b []byte) error {
+	var name string
+	if err := json.Unmarshal(b, &name); err == nil {
+		*n = sandboxName(name)
+		return nil
+	}
+	var legacy struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(b, &legacy); err != nil {
+		return err
+	}
+	*n = sandboxName(legacy.Name)
+	return nil
 }
 
 type record struct {
@@ -56,7 +80,7 @@ func (s *JSONLStore) Save(_ context.Context, sess *Session) error {
 	enc := json.NewEncoder(w)
 	writeErr := enc.Encode(record{Kind: "meta", Meta: &sessionMeta{
 		ID: sess.ID, Model: sess.Model, Status: sess.Status,
-		Usage: sess.Usage, Sandbox: sess.Sandbox,
+		Usage: sess.Usage, Sandbox: sandboxName(sess.name),
 	}})
 	for i := range sess.Messages {
 		if writeErr != nil {
@@ -103,7 +127,10 @@ func (s *JSONLStore) Load(_ context.Context, id string) (*Session, error) {
 		case "meta":
 			if rec.Meta != nil {
 				sess.Model, sess.Status = rec.Meta.Model, rec.Meta.Status
-				sess.Usage, sess.Sandbox = rec.Meta.Usage, rec.Meta.Sandbox
+				sess.Usage = rec.Meta.Usage
+				// The name only: binding it to a live sandbox is the caller's,
+				// which is what keeps a store out of the sandbox business.
+				sess.name = string(rec.Meta.Sandbox)
 			}
 		case "message":
 			if rec.Message != nil {

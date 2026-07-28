@@ -17,10 +17,19 @@ type handle struct {
 
 var _ agent.Sandbox = (*handle)(nil)
 
+// Name is the sandbox this handle refers to, and the whole of its identity: a
+// caller that has a handle needs nothing else to say which sandbox it is in.
+func (h *handle) Name() string { return h.entry.spec.Name }
+
 func (h *handle) Exec(ctx context.Context, cmd agent.Command) (agent.ExecResult, error) {
 	if h.closed.Load() {
 		return agent.ExecResult{}, ErrClosed
 	}
+	// The first command is where the manager stops guessing about what it
+	// inherited, and it happens here rather than inside the sandbox's goroutine:
+	// the pass asks other sandboxes what state to record, which a goroutine
+	// already serving this command could not answer for.
+	h.entry.mgr.ensureAdopted(ctx)
 	return h.entry.ask(request{kind: reqExec, ctx: ctx, cmd: cmd})
 }
 

@@ -31,14 +31,12 @@ func AssistantText(text string) fantasy.Message {
 	}}
 }
 
-// UserSession returns an active Session seeded with a single user turn.
-func UserSession(id, modelID, prompt string) *agent.Session {
-	return &agent.Session{
-		ID:       id,
-		Model:    modelID,
-		Status:   agent.StatusActive,
-		Messages: []fantasy.Message{fantasy.NewUserMessage(prompt)},
-	}
+// UserSession returns an active Session bound to box and seeded with a single
+// user turn.
+func UserSession(id, modelID string, box agent.Sandbox, prompt string) *agent.Session {
+	sess := agent.NewSession(id, modelID, box)
+	sess.Messages = append(sess.Messages, fantasy.NewUserMessage(prompt))
+	return sess
 }
 
 // RunToCompletion drives the agent to the end of its event stream and returns

@@ -43,11 +43,11 @@ func TestRunWritesHelloWorld(t *testing.T) {
 	a := agent.New(systemPrompt,
 		agent.WithModel(mdl),
 		agent.WithStore(&testutils.MemStore{}),
-		agent.WithSandbox(testutils.NopFactory{}),
 		agent.WithTools(tool),
 	)
 
-	sess := testutils.UserSession("t1", "fake-model", "Write a hello world program in Go.")
+	box := &testutils.FakeSandbox{SandboxName: "work"}
+	sess := testutils.UserSession("t1", "fake-model", box, "Write a hello world program in Go.")
 
 	got := testutils.RunToCompletion(t, a, sess)
 

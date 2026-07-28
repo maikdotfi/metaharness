@@ -31,6 +31,17 @@ type Local struct {
 
 var _ agent.Sandbox = (*Local)(nil)
 
+// Name is the directory's own name, which is exactly what LocalBackend uses as a
+// sandbox name: the sandbox "work" under Root is the directory Root/work. A
+// Local with no Dir is not one of those — it is wherever the process happens to
+// be — and says so.
+func (l *Local) Name() string {
+	if l.Dir == "" {
+		return "local"
+	}
+	return filepath.Base(l.Dir)
+}
+
 // Exec runs cmd on the host, capturing stdout and stderr. A command that runs
 // to completion — even with a non-zero exit status — returns a populated
 // ExecResult and a nil error: the exit code is a normal outcome the caller
@@ -82,7 +93,25 @@ type LocalBackend struct {
 
 var _ Backend = LocalBackend{}
 
-func (b LocalBackend) EnsureReady(_ context.Context, spec agent.SandboxSpec) error {
+// LocalKind is the name LocalBackend answers to in New, and what an empty kind
+// means there. Unlike the other backends it needs no import to be available: it
+// lives in this package, brings no dependencies, and being what an application
+// falls back to is the point of it.
+const LocalKind = "local"
+
+func init() {
+	Register(LocalKind, func(cfg Config) (Backend, error) {
+		// There is no sensible default here. An empty Root would put sandboxes in
+		// whatever directory the process was started from, which is someone's
+		// source tree often enough that a refusal is kinder than a surprise.
+		if cfg.Root == "" {
+			return nil, errors.New("sandbox: the local backend needs a Root to create sandboxes under")
+		}
+		return LocalBackend{Root: cfg.Root}, nil
+	})
+}
+
+func (b LocalBackend) EnsureReady(_ context.Context, spec Spec) error {
 	dir, err := b.dir(spec.Name)
 	if err != nil {
 		return err
@@ -129,6 +158,10 @@ func (b LocalBackend) List(context.Context) ([]BackendSandbox, error) {
 	}
 	return found, nil
 }
+
+// Close does nothing: the host filesystem is not a connection this backend
+// holds open. The sandbox directories stay where they are.
+func (b LocalBackend) Close() error { return nil }
 
 // dir keeps a sandbox name a name. Anything that could point somewhere other
 // than a direct child of Root — a path separator, a parent reference, an

@@ -63,21 +63,22 @@ func run(ctx context.Context, modelID, workdir, prompt string, think bool, effor
 	}
 
 	// A sandbox is addressed by name, and on the local backend a name is a
-	// directory under Root — so reviewing ./checkout is the sandbox "checkout"
+	// directory under the root — so reviewing ./checkout is the sandbox "checkout"
 	// rooted at ".". The review is read-mostly and single-shot, but it goes
 	// through the manager like anything else.
 	root, name := filepath.Split(filepath.Clean(workdir))
 	if root == "" {
 		root = "."
 	}
-	sandboxes := sandbox.NewManager(sandbox.LocalBackend{Root: root})
+	sandboxes, err := sandbox.New(sandbox.LocalKind, sandbox.WithRoot(root))
+	if err != nil {
+		return err
+	}
 	defer sandboxes.Close()
 
 	a := agent.New(systemPrompt,
 		agent.WithModel(m),
 		agent.WithStore(agent.DiscardStore{}),
-		agent.WithSandbox(sandboxes),
-		agent.WithSandboxSpec(agent.SandboxSpec{Name: name}),
 		agent.WithTools(
 			agent.Adapt(tools.Bash{}),
 			agent.Adapt(tools.ReadFile{}),
@@ -87,13 +88,16 @@ func run(ctx context.Context, modelID, workdir, prompt string, think bool, effor
 		),
 	)
 
-	sess := &agent.Session{
-		ID:       fmt.Sprintf("review-%d", time.Now().Unix()),
-		Model:    modelID,
-		Messages: []model.Message{model.NewUserMessage(prompt)},
-		Status:   agent.StatusActive,
+	// The session is the binding of this task to that sandbox, and it owns the
+	// handle: closing it releases the reference, never the sandbox.
+	box, err := sandboxes.Open(name)
+	if err != nil {
+		return err
 	}
-	fmt.Printf("session %s\n\n", sess.ID)
+	sess := agent.NewSession(fmt.Sprintf("review-%d", time.Now().Unix()), modelID, box)
+	defer sess.Close()
+	sess.Messages = append(sess.Messages, model.NewUserMessage(prompt))
+	fmt.Printf("session %s in sandbox %s\n\n", sess.ID, sess.SandboxName())
 
 	events, err := a.Run(ctx, sess)
 	if err != nil {

@@ -1,8 +1,9 @@
 # Code Review Agent Demo
 
 This is the smallest complete picture of Meta Harness today: an application
-assembles a model, store, sandbox, and tools into an `agent.Agent`, then runs
-one mutable `agent.Session` through the model/tool loop.
+assembles a model, store, and tools into an `agent.Agent`, opens a sandbox
+through a `sandbox.Manager`, and runs one mutable `agent.Session` — the task
+bound to that sandbox — through the model/tool loop.
 
 ```mermaid
 flowchart LR
@@ -10,10 +11,11 @@ flowchart LR
     Config[model.Config] --> Model[model.New]
     Model --> Agent
     Discard[agent.DiscardStore] --> Agent
-    Sandboxes["sandbox.Manager\nsandbox.LocalBackend"] --> Agent
     OSTools["bash · read_file · edit_file · write_file"] --> Agent
     Skill["skill · grug-review"] --> Agent
 
+    Sandboxes["sandbox.Manager\nsandbox.LocalBackend"] --> Box["Open(\"checkout\")"]
+    Box --> Session[agent.Session]
     Session[agent.Session] --> Run[Agent.Run]
     Agent --> Run
     Run --> Events["assistant · tool_result · done · error"]
@@ -36,8 +38,6 @@ m, _ := model.New(model.Config{
 a := agent.New(systemPrompt,
     agent.WithModel(m),
     agent.WithStore(agent.DiscardStore{}),
-    agent.WithSandbox(sandbox.NewManager(sandbox.LocalBackend{Root: "."})),
-    agent.WithSandboxSpec(agent.SandboxSpec{Name: "checkout"}),
     agent.WithTools(
         agent.Adapt(tools.Bash{}),
         agent.Adapt(tools.ReadFile{}),
@@ -65,15 +65,23 @@ skill({"skill":"grug-review"})
   -> appended as a tool-result message
 ```
 
+The agent holds no sandbox: model, tools, prompt and store are all it is, which
+is why one agent serves every session.
+
 ## Session and run
 
+The sandbox comes from the manager, and the session is the task bound to it. The
+application owns the manager and closes it; the session owns its handle and
+closes that.
+
 ```go
-sess := &agent.Session{
-    ID:       fmt.Sprintf("review-%d", time.Now().Unix()),
-    Model:    modelID,
-    Messages: []model.Message{model.NewUserMessage(prompt)},
-    Status:   agent.StatusActive,
-}
+sandboxes, err := sandbox.New(sandbox.LocalKind, sandbox.WithRoot("."))
+defer sandboxes.Close()
+
+box, err := sandboxes.Open("checkout")
+sess := agent.NewSession(fmt.Sprintf("review-%d", time.Now().Unix()), modelID, box)
+defer sess.Close()
+sess.Messages = append(sess.Messages, model.NewUserMessage(prompt))
 
 events, err := a.Run(ctx, sess)
 for event := range events {
@@ -90,8 +98,10 @@ sequenceDiagram
     participant Box as sandbox.Manager
     participant Store as DiscardStore
 
+    App->>Box: Open("checkout")
+    Box-->>App: sandbox handle
+    App->>App: NewSession(id, model, handle)
     App->>Agent: Run(ctx, session)
-    Agent->>Box: Open(session.Sandbox)
 
     loop Until assistant returns without tool calls
         Agent->>Model: Generate(system prompt, transcript, tool schemas)
@@ -112,19 +122,25 @@ sequenceDiagram
     Agent->>Agent: status = completed
     Agent->>Store: Save(session)
     Agent-->>App: EventDone
-    Agent->>Box: Close()
+    App->>Box: session.Close()
 ```
+
+A finished turn leaves the sandbox alone: the handle belongs to the session, and
+the sandbox keeps running until the manager's idle policy or a `Destroy` says
+otherwise.
 
 `DiscardStore.Save` succeeds without retaining checkpoints, so the live
 session is the only transcript. Applications can replace it with `JSONLStore`
 through `agent.WithStore` when persistence is wanted.
 
 ```text
-Session = ID + model ID + fantasy messages + token usage + status + sandbox spec
+Session = ID + model ID + fantasy messages + token usage + status + its sandbox
 ```
 
-The spec names the sandbox; on `sandbox.LocalBackend` a name is a directory
-under its root, and commands run there on the host. It only sets the process
+The name is the sandbox's whole identity, and it is all that is persisted: image
+and backend are this process's configuration, so a restored session is bound
+again by name through `Session.Bind`. On `sandbox.LocalBackend` a name is a
+directory under its root, and commands run there on the host. It only sets the process
 working directory, and is deliberately a development backend rather than
 security isolation: commands can reach the host and escape `workdir` with
 absolute paths or `..`.

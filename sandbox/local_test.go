@@ -97,7 +97,7 @@ func TestLocalBackendGivesEachNameItsOwnDirectory(t *testing.T) {
 	ctx := context.Background()
 
 	for _, name := range []string{"one", "two"} {
-		if err := backend.EnsureReady(ctx, agent.SandboxSpec{Name: name}); err != nil {
+		if err := backend.EnsureReady(ctx, Spec{Name: name}); err != nil {
 			t.Fatalf("EnsureReady(%q): %v", name, err)
 		}
 		if _, err := backend.Exec(ctx, name, bash("echo "+name+" > who.txt")); err != nil {
@@ -121,7 +121,7 @@ func TestLocalBackendGivesEachNameItsOwnDirectory(t *testing.T) {
 func TestLocalBackendFilesystemSurvivesStop(t *testing.T) {
 	backend := LocalBackend{Root: t.TempDir()}
 	ctx := context.Background()
-	spec := agent.SandboxSpec{Name: "work"}
+	spec := Spec{Name: "work"}
 
 	if err := backend.EnsureReady(ctx, spec); err != nil {
 		t.Fatalf("EnsureReady: %v", err)
@@ -150,7 +150,7 @@ func TestLocalBackendFilesystemSurvivesStop(t *testing.T) {
 func TestLocalBackendDestroyRemovesFilesystem(t *testing.T) {
 	backend := LocalBackend{Root: t.TempDir()}
 	ctx := context.Background()
-	if err := backend.EnsureReady(ctx, agent.SandboxSpec{Name: "work"}); err != nil {
+	if err := backend.EnsureReady(ctx, Spec{Name: "work"}); err != nil {
 		t.Fatalf("EnsureReady: %v", err)
 	}
 
@@ -172,7 +172,7 @@ func TestLocalBackendListsWhatSurvived(t *testing.T) {
 	backend := LocalBackend{Root: t.TempDir()}
 	ctx := context.Background()
 	for _, name := range []string{"alpha", "beta"} {
-		if err := backend.EnsureReady(ctx, agent.SandboxSpec{Name: name}); err != nil {
+		if err := backend.EnsureReady(ctx, Spec{Name: name}); err != nil {
 			t.Fatalf("EnsureReady(%q): %v", name, err)
 		}
 	}
@@ -215,7 +215,7 @@ func TestLocalBackendRejectsNamesThatEscapeRoot(t *testing.T) {
 
 	for _, name := range []string{"", ".", "..", "../escape", "nested/work", "/abs"} {
 		t.Run(name, func(t *testing.T) {
-			if err := backend.EnsureReady(context.Background(), agent.SandboxSpec{Name: name}); err == nil {
+			if err := backend.EnsureReady(context.Background(), Spec{Name: name}); err == nil {
 				t.Errorf("EnsureReady(%q) should be rejected", name)
 			}
 		})
@@ -228,11 +228,13 @@ func TestLocalBackendRejectsNamesThatEscapeRoot(t *testing.T) {
 // there until someone destroys it.
 func TestManagedSandboxOutlivesTheProcess(t *testing.T) {
 	root, ctx := t.TempDir(), context.Background()
-	spec := agent.SandboxSpec{Name: "work"}
 
 	clock := newFakeClock()
-	first := NewManager(LocalBackend{Root: root}, WithClock(clock), WithIdleTimeout(testIdle))
-	box, err := first.Open(spec)
+	first, err := New(LocalKind, WithRoot(root), WithClock(clock), WithIdleTimeout(testIdle))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	box, err := first.Open("work")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -241,19 +243,18 @@ func TestManagedSandboxOutlivesTheProcess(t *testing.T) {
 	}
 	box.Close()
 	clock.Advance(testIdle)
+	first.Close()
 
-	// A new process over the same backend: it learns what survived, then works in
-	// the same sandbox.
-	second := NewManager(LocalBackend{Root: root}, WithClock(newFakeClock()), WithIdleTimeout(testIdle))
-	report, err := second.Reconcile(ctx)
+	// A new process over the same sandboxes, assembled the way an application
+	// assembles one: a kind and where they live. It is told nothing about what
+	// survived, and works in the same sandbox anyway.
+	second, err := New(LocalKind, WithRoot(root), WithClock(newFakeClock()), WithIdleTimeout(testIdle))
 	if err != nil {
-		t.Fatalf("Reconcile: %v", err)
+		t.Fatalf("New after restart: %v", err)
 	}
-	if !slices.Contains(report.Asleep, "work") {
-		t.Errorf("Reconcile did not find the sandbox: %+v", report)
-	}
+	defer second.Close()
 
-	resumed, err := second.Open(spec)
+	resumed, err := second.Open("work")
 	if err != nil {
 		t.Fatalf("Open after restart: %v", err)
 	}

@@ -13,6 +13,9 @@ package sandbox
 // not just that it failed but where the sandbox was left: a sandbox that
 // refused to stop is back in StateReady and still usable, and one that refused
 // to be destroyed is back where it was.
+//
+// Name is empty on the one event that is about no particular sandbox:
+// EventReconcileFailed is the whole backend being unreachable.
 type Event struct {
 	Type EventType
 	Name string
@@ -42,9 +45,15 @@ const (
 	EventDestroyed
 	// EventDestroyFailed: the sandbox is still there and still usable.
 	EventDestroyFailed
-	// EventObserved: startup reconciliation found this sandbox on the backend.
-	// To is the state it was found in.
+	// EventObserved: reconciliation found this sandbox on the backend. To is the
+	// state it was found in.
 	EventObserved
+	// EventReconcileFailed: the backend could not be asked what it holds, so the
+	// manager could not establish what it inherited. It is about no one sandbox,
+	// so Name is empty. Nothing failed for a caller — commands run on an
+	// idempotent prepare either way — but compute an earlier process left running
+	// is not on the idle clock, and will not be until a pass succeeds.
+	EventReconcileFailed
 )
 
 func (t EventType) String() string {
@@ -63,6 +72,8 @@ func (t EventType) String() string {
 		return "destroy failed"
 	case EventObserved:
 		return "observed"
+	case EventReconcileFailed:
+		return "reconcile failed"
 	default:
 		return "invalid"
 	}
@@ -83,17 +94,27 @@ func (t EventType) String() string {
 //     Destroy on the sandbox it is being told about: the answer would have to come
 //     from the goroutine that is currently running the observer.
 //
+// EventReconcileFailed is the exception to the first half of that: it is about no
+// sandbox, so it arrives on the goroutine of whichever caller's command triggered
+// the pass. An observer must not run work on the manager from it either, for the
+// same reason — the pass it is reporting is still in progress.
+//
 // Observers cannot change what happened. There is no error to return, and
 // nothing is retried on their behalf.
 func WithObserver(fn func(Event)) Option {
-	return func(m *Manager) { m.observer = fn }
+	return func(s *settings) { s.observer = fn }
+}
+
+// report hands one event to the observer, if there is one.
+func (m *Manager) report(ev Event) {
+	if m.observer == nil {
+		return
+	}
+	m.observer(ev)
 }
 
 // emit tells the observer about a published transition. It runs on the sandbox's
 // goroutine, holding no lock.
 func (e *entry) emit(t EventType, from, to State, err error) {
-	if e.mgr.observer == nil {
-		return
-	}
-	e.mgr.observer(Event{Type: t, Name: e.spec.Name, From: from, To: to, Err: err})
+	e.mgr.report(Event{Type: t, Name: e.spec.Name, From: from, To: to, Err: err})
 }

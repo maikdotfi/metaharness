@@ -341,6 +341,7 @@ func TestEventTypeString(t *testing.T) {
 		{EventDestroyed, "destroyed"},
 		{EventDestroyFailed, "destroy failed"},
 		{EventObserved, "observed"},
+		{EventReconcileFailed, "reconcile failed"},
 	} {
 		if got := tc.t.String(); got != tc.want {
 			t.Errorf("EventType(%d).String() = %q, want %q", tc.t, got, tc.want)

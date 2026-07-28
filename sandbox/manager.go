@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/maikdotfi/metaharness/agent"
@@ -31,11 +32,24 @@ type Manager struct {
 	backend  Backend
 	clock    Clock
 	idle     time.Duration
+	image    string
 	observer func(Event)
 
+	// adoptMu guards the one adoption pass, and is held across the backend call
+	// it makes: two first commands racing run one pass between them, with the
+	// loser waiting for the winner's answer rather than listing again. adopted is
+	// published separately so a command after the pass reads it without the lock,
+	// which is what keeps the pass out of the path of every later command.
+	adoptMu sync.Mutex
+	adopted atomic.Bool
+
 	// closing is closed by Close, and is every sandbox's signal to shut down.
+	// closed is closed once shutdown has finished, so a second caller waits for
+	// the first one's answer rather than returning while work is still draining.
 	closing   chan struct{}
+	closed    chan struct{}
 	closeOnce sync.Once
+	closeErr  error
 
 	// mu guards the name lookup and nothing else, so a slow backend call on one
 	// sandbox never blocks opening or inspecting another.
@@ -43,39 +57,103 @@ type Manager struct {
 	entries map[string]*entry
 }
 
-type Option func(*Manager)
+// Option configures a manager. Most of them are about the manager itself; the
+// ones that describe where sandboxes live reach the backend New constructs,
+// and so do nothing in NewManager, which is handed a backend that already
+// exists.
+type Option func(*settings)
+
+// settings is what the options add up to. It exists because some of them are
+// answered before there is a Manager to configure: WithRoot has to reach the
+// backend's constructor, and the backend is what a Manager is built around.
+type settings struct {
+	cfg      Config
+	image    string
+	clock    Clock
+	idle     time.Duration
+	observer func(Event)
+}
+
+func defaults() settings {
+	return settings{clock: systemClock{}, idle: DefaultIdleTimeout}
+}
+
+// WithRoot sets the host directory a backend that keeps sandboxes on the local
+// filesystem creates them under. A backend with storage of its own — a
+// container's writable layer, say — ignores it.
+func WithRoot(dir string) Option { return func(s *settings) { s.cfg.Root = dir } }
+
+// WithImage sets the image sandboxes are created from. It is creation
+// configuration and nothing more: a name that already has a sandbox behind it
+// keeps the image that sandbox was made with, whatever this says.
+func WithImage(image string) Option { return func(s *settings) { s.image = image } }
 
 // WithClock replaces the manager's source of time. Tests use it to advance the
 // idle policy without sleeping.
-func WithClock(c Clock) Option { return func(m *Manager) { m.clock = c } }
+func WithClock(c Clock) Option { return func(s *settings) { s.clock = c } }
 
 // WithIdleTimeout sets how long a sandbox may sit unused before its compute is
 // released. A non-positive duration disables stopping entirely.
-func WithIdleTimeout(d time.Duration) Option { return func(m *Manager) { m.idle = d } }
+func WithIdleTimeout(d time.Duration) Option { return func(s *settings) { s.idle = d } }
 
-func NewManager(backend Backend, opts ...Option) *Manager {
-	m := &Manager{
-		backend: backend,
-		clock:   systemClock{},
-		idle:    DefaultIdleTimeout,
-		closing: make(chan struct{}),
-		entries: map[string]*entry{},
-	}
+// New assembles the one thing an application needs: a manager over the backend
+// registered under kind, ready to open sandboxes on. An empty kind is the local
+// backend, which needs no import of its own.
+//
+// The manager owns the backend it constructed here, so closing the manager is
+// the whole of an application's cleanup. A kind nobody registered fails here
+// rather than on the first command, and so does a backend that could not be
+// built.
+func New(kind string, opts ...Option) (*Manager, error) {
+	set := defaults()
 	for _, o := range opts {
-		o(m)
+		o(&set)
 	}
-	return m
+	if kind == "" {
+		kind = LocalKind
+	}
+	backend, err := NewBackend(kind, set.cfg)
+	if err != nil {
+		return nil, err
+	}
+	return newManager(backend, set), nil
 }
 
-var _ agent.SandboxFactory = (*Manager)(nil)
+// NewManager builds a manager over a backend the caller already has. It is the
+// escape hatch for a backend that is not in the registry — one under test, or
+// one an application constructed itself; New is what applications use.
+func NewManager(backend Backend, opts ...Option) *Manager {
+	set := defaults()
+	for _, o := range opts {
+		o(&set)
+	}
+	return newManager(backend, set)
+}
 
-// Open binds a handle to a name. It never calls the backend: nothing is
-// created, started or looked up until the first command needs it.
-func (m *Manager) Open(spec agent.SandboxSpec) (agent.Sandbox, error) {
-	if spec.Name == "" {
+func newManager(backend Backend, set settings) *Manager {
+	return &Manager{
+		backend:  backend,
+		clock:    set.clock,
+		idle:     set.idle,
+		image:    set.image,
+		observer: set.observer,
+		closing:  make(chan struct{}),
+		closed:   make(chan struct{}),
+		entries:  map[string]*entry{},
+	}
+}
+
+// Open binds a handle to a name, which is the whole of what a caller has to
+// know: what sandboxes are made from, and where they live, were settled when
+// the manager was built.
+//
+// It never calls the backend: nothing is created, started or looked up until the
+// first command needs it.
+func (m *Manager) Open(name string) (agent.Sandbox, error) {
+	if name == "" {
 		return nil, ErrNameRequired
 	}
-	e, err := m.entryFor(spec)
+	e, err := m.entryFor(Spec{Name: name, Image: m.image})
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +168,7 @@ func (m *Manager) Destroy(ctx context.Context, name string) error {
 	if name == "" {
 		return ErrNameRequired
 	}
-	e, err := m.entryFor(agent.SandboxSpec{Name: name})
+	e, err := m.entryFor(Spec{Name: name})
 	if err != nil {
 		return err
 	}
@@ -101,24 +179,32 @@ func (m *Manager) Destroy(ctx context.Context, name string) error {
 	return nil
 }
 
-// Close releases the manager's own machinery: the goroutine and idle timer
-// behind each sandbox. It waits for whatever is in flight to finish, so a
-// command already running still returns its result to its caller.
+// Close releases everything the manager owns: the goroutine and idle timer
+// behind each sandbox, and then the backend it was given. It waits for whatever
+// is in flight to finish first, so a command already running still returns its
+// result to its caller — and still has the backend under it while it does.
 //
 // It deliberately leaves the sandboxes as they are. Outliving the process that
-// used them is the point of them, and Reconcile is how the next one picks them
-// up. Close is idempotent, and a closed manager takes no new work.
+// used them is the point of them, and the next one adopts them on its first
+// command; a backend connection going away says nothing about them either way. Close
+// is idempotent, returns the backend's error, and a closed manager takes no new
+// work.
 func (m *Manager) Close() error {
-	m.closeOnce.Do(func() { close(m.closing) })
+	m.closeOnce.Do(func() {
+		defer close(m.closed)
+		close(m.closing)
 
-	m.mu.Lock()
-	known := slices.Collect(maps.Values(m.entries))
-	m.mu.Unlock()
+		m.mu.Lock()
+		known := slices.Collect(maps.Values(m.entries))
+		m.mu.Unlock()
 
-	for _, e := range known {
-		<-e.gone
-	}
-	return nil
+		for _, e := range known {
+			<-e.gone
+		}
+		m.closeErr = m.backend.Close()
+	})
+	<-m.closed
+	return m.closeErr
 }
 
 // Inspect reports what the manager believes about every sandbox it knows,
@@ -157,11 +243,59 @@ type ReconcileReport struct {
 // stops and removes nothing: compute someone left running is simply put on the
 // idle clock, which bounds it to one window. Sandboxes the manager already
 // tracks are left exactly as they are.
+//
+// Calling it is optional. The manager makes the same pass itself before it acts
+// on a belief about any name, because a step that has to be remembered is a step
+// that gets forgotten, and forgetting this one used to mean leaked compute
+// stayed leaked. What this adds is the report, and the choice of when: a process
+// that will not run anything for a while can bound what it inherited now rather
+// than on its first command. It satisfies the manager's own pass, so calling it
+// costs nothing later.
 func (m *Manager) Reconcile(ctx context.Context) (ReconcileReport, error) {
 	if m.shuttingDown() {
 		return ReconcileReport{}, ErrShutdown
 	}
 
+	m.adoptMu.Lock()
+	defer m.adoptMu.Unlock()
+
+	report, err := m.reconcile(ctx)
+	if err != nil {
+		return ReconcileReport{}, err
+	}
+	m.adopted.Store(true)
+	return report, nil
+}
+
+// ensureAdopted makes the adoption pass before the manager acts on what it
+// believes about a name, and is the reason Reconcile is not a chore.
+//
+// A pass that failed is not the caller's problem and does not fail their
+// command: it leaves the manager with the empty belief it already had, which
+// EnsureReady copes with by being idempotent, and the next command tries again.
+// The observer is told, because an application that wanted to know about a
+// backend it could not reach has nowhere else to learn it.
+func (m *Manager) ensureAdopted(ctx context.Context) {
+	if m.adopted.Load() || m.shuttingDown() {
+		return
+	}
+
+	m.adoptMu.Lock()
+	defer m.adoptMu.Unlock()
+
+	if m.adopted.Load() {
+		return
+	}
+	if _, err := m.reconcile(ctx); err != nil {
+		m.report(Event{Type: EventReconcileFailed, Err: err})
+		return
+	}
+	m.adopted.Store(true)
+}
+
+// reconcile is the pass itself. Callers hold adoptMu, so exactly one runs at a
+// time.
+func (m *Manager) reconcile(ctx context.Context) (ReconcileReport, error) {
 	found, err := m.backend.List(ctx)
 	if err != nil {
 		return ReconcileReport{}, err
@@ -169,7 +303,7 @@ func (m *Manager) Reconcile(ctx context.Context) (ReconcileReport, error) {
 
 	var report ReconcileReport
 	for _, bs := range found {
-		e, known, err := m.adopt(agent.SandboxSpec{Name: bs.Name, Image: bs.Image})
+		e, known, err := m.adopt(Spec{Name: bs.Name, Image: bs.Image})
 		if err != nil {
 			return ReconcileReport{}, err
 		}
@@ -196,12 +330,12 @@ func (m *Manager) Reconcile(ctx context.Context) (ReconcileReport, error) {
 
 // entryFor returns the one entry for spec.Name, creating it on first sight. An
 // existing entry wins: once a name is known, its spec is authoritative.
-func (m *Manager) entryFor(spec agent.SandboxSpec) (*entry, error) {
+func (m *Manager) entryFor(spec Spec) (*entry, error) {
 	e, _, err := m.adopt(spec)
 	return e, err
 }
 
-func (m *Manager) adopt(spec agent.SandboxSpec) (e *entry, known bool, err error) {
+func (m *Manager) adopt(spec Spec) (e *entry, known bool, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -275,7 +409,7 @@ type reply struct {
 // transition.
 type entry struct {
 	mgr  *Manager
-	spec agent.SandboxSpec
+	spec Spec
 
 	// reqs is unbuffered, so a delivered request is one the goroutine has taken
 	// and will answer.
@@ -299,7 +433,7 @@ type entry struct {
 	snap Info
 }
 
-func newEntry(m *Manager, spec agent.SandboxSpec) *entry {
+func newEntry(m *Manager, spec Spec) *entry {
 	e := &entry{
 		mgr:  m,
 		spec: spec,

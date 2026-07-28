@@ -140,3 +140,96 @@ func TestReconciledSandboxIsUsable(t *testing.T) {
 		t.Errorf("EnsureReady called %d times on an already-running sandbox, want 0", got)
 	}
 }
+
+// TestFirstCommandAdoptsWithoutBeingAsked is why reconciling is not the
+// application's chore. Nothing here calls Reconcile, and compute an earlier
+// process left running is still bounded by one idle window: forgetting a call
+// cannot be what decides whether a container runs forever.
+func TestFirstCommandAdoptsWithoutBeingAsked(t *testing.T) {
+	m, backend, clock := newTestManager(t)
+	backend.create("leftover", "test:latest", true)
+
+	mustExec(t, mustOpen(t, m, "work"))
+	clock.Advance(testIdle)
+
+	if _, running := backend.alive("leftover"); running {
+		t.Error("compute an earlier process left running was never put on the idle clock")
+	}
+	if exists, _ := backend.alive("leftover"); !exists {
+		t.Error("adoption removed a sandbox; it may only stop one")
+	}
+}
+
+// TestAdoptionHappensOnce checks the pass is startup work rather than a cost
+// every command pays.
+func TestAdoptionHappensOnce(t *testing.T) {
+	m, backend, _ := newTestManager(t)
+	box := mustOpen(t, m, "work")
+
+	mustExec(t, box)
+	mustExec(t, box)
+	mustExec(t, mustOpen(t, m, "other"))
+
+	if got := backend.count("List"); got != 1 {
+		t.Errorf("the backend was listed %d times, want 1: %v", got, backend.history())
+	}
+}
+
+// TestReconcileSatisfiesAdoption checks an application that wants the report up
+// front — a long-running process with nothing to run yet — does not pay for a
+// second pass on its first command.
+func TestReconcileSatisfiesAdoption(t *testing.T) {
+	m, backend, _ := newTestManager(t)
+	if _, err := m.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	mustExec(t, mustOpen(t, m, "work"))
+
+	if got := backend.count("List"); got != 1 {
+		t.Errorf("the backend was listed %d times, want 1: %v", got, backend.history())
+	}
+}
+
+// TestAdoptionFailureDoesNotFailTheCommand checks housekeeping stays
+// housekeeping: a backend that could not be listed leaves the manager with the
+// empty belief it already had, which the idempotent prepare copes with, and the
+// pass is tried again rather than given up on.
+func TestAdoptionFailureDoesNotFailTheCommand(t *testing.T) {
+	m, backend, _ := newTestManager(t)
+	backend.listErr = errors.New("daemon down")
+	box := mustOpen(t, m, "work")
+
+	mustExec(t, box)
+
+	backend.listErr = nil
+	mustExec(t, box)
+
+	if got := backend.count("List"); got != 2 {
+		t.Errorf("a failed adoption pass was not retried: listed %d times, want 2", got)
+	}
+}
+
+// TestAdoptionFailureIsReported checks the visibility an explicit Reconcile used
+// to give is not lost with the call: an application that watches events is told
+// its belief could not be established.
+func TestAdoptionFailureIsReported(t *testing.T) {
+	m, backend, _, rec := watched(t)
+	boom := errors.New("daemon down")
+	backend.listErr = boom
+
+	mustExec(t, mustOpen(t, m, "work"))
+
+	var found *Event
+	for _, ev := range rec.all() {
+		if ev.Type == EventReconcileFailed {
+			found = &ev
+		}
+	}
+	if found == nil {
+		t.Fatalf("recorded %v, want a %v", rec.types(), EventReconcileFailed)
+	}
+	if !errors.Is(found.Err, boom) {
+		t.Errorf("Err = %v, want %v", found.Err, boom)
+	}
+}

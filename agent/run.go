@@ -29,25 +29,22 @@ func (a *Agent) Run(ctx context.Context, sess *Session) (<-chan Event, error) {
 	if sess == nil {
 		return nil, errors.New("nil session")
 	}
-	if a.Model == nil || a.Store == nil || a.Newbox == nil {
+	if a.Model == nil || a.Store == nil {
 		return nil, errors.New("agent not fully wired")
+	}
+
+	// The sandbox comes with the session and the session owns it: a turn ending
+	// is not a reason to release the handle, and the next turn of the same task
+	// runs in the same filesystem. Binding one is the application's job, done
+	// before the turn rather than inside it.
+	box := sess.Sandbox()
+	if box == nil {
+		return nil, errors.New("session has no sandbox")
 	}
 
 	out := make(chan Event, 8)
 	go func() {
 		defer close(out)
-
-		// The session records the sandbox it ran in, so resuming it later binds
-		// the same name and the same filesystem.
-		if sess.Sandbox.Name == "" {
-			sess.Sandbox = a.Sandbox
-		}
-		box, err := a.Newbox.Open(sess.Sandbox)
-		if err != nil {
-			a.fail(ctx, sess, out, err)
-			return
-		}
-		defer box.Close()
 
 		for {
 			if err := ctx.Err(); err != nil {

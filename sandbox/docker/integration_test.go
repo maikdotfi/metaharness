@@ -28,8 +28,8 @@ const (
 	liveName  = "integration"
 )
 
-func liveSpec() agent.SandboxSpec {
-	return agent.SandboxSpec{Name: liveName, Image: liveImage}
+func liveSpec() sandbox.Spec {
+	return sandbox.Spec{Name: liveName, Image: liveImage}
 }
 
 // liveBackend connects to the daemon, or skips if there is none. It leaves no

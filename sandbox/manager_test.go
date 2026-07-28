@@ -19,7 +19,9 @@ func newTestManager(t *testing.T, opts ...Option) (*Manager, *fakeBackend, *fake
 	t.Helper()
 	backend := newFakeBackend()
 	clock := newFakeClock()
-	opts = append([]Option{WithClock(clock), WithIdleTimeout(testIdle)}, opts...)
+	opts = append([]Option{
+		WithClock(clock), WithIdleTimeout(testIdle), WithImage("test:latest"),
+	}, opts...)
 	m := NewManager(backend, opts...)
 	// Every test shuts its manager down, so a leaked sandbox goroutine shows up as
 	// a hanging test rather than as nothing at all.
@@ -29,7 +31,7 @@ func newTestManager(t *testing.T, opts ...Option) (*Manager, *fakeBackend, *fake
 
 func mustOpen(t *testing.T, m *Manager, name string) agent.Sandbox {
 	t.Helper()
-	box, err := m.Open(agent.SandboxSpec{Name: name, Image: "test:latest"})
+	box, err := m.Open(name)
 	if err != nil {
 		t.Fatalf("Open(%q): %v", name, err)
 	}
@@ -70,10 +72,65 @@ func TestOpenIsBackendFree(t *testing.T) {
 	}
 }
 
+// TestHandleKnowsWhichSandboxItIs pins that a handle carries its own identity:
+// whoever holds one can say which sandbox they are in without being told
+// separately.
+func TestHandleKnowsWhichSandboxItIs(t *testing.T) {
+	m, _, _ := newTestManager(t)
+
+	box := mustOpen(t, m, "work")
+
+	if box.Name() != "work" {
+		t.Errorf("Name() = %q, want %q", box.Name(), "work")
+	}
+}
+
+// TestWithImageCreatesTheSandbox covers creation configuration reaching the
+// backend: the image is what a name with nothing behind it is made from, and it
+// is the manager's, so opening a sandbox needs nothing but its name.
+func TestWithImageCreatesTheSandbox(t *testing.T) {
+	m, backend, _ := newTestManager(t, WithImage("alpine:3"))
+
+	mustExec(t, mustOpen(t, m, "work"))
+
+	if got := backend.imageOf("work"); got != "alpine:3" {
+		t.Errorf("sandbox created from %q, want %q", got, "alpine:3")
+	}
+}
+
+// TestExistingSandboxKeepsItsImage pins that an image is creation configuration
+// and nothing more: a later process configured with a different image works in
+// the sandbox that is already there rather than replacing it.
+func TestExistingSandboxKeepsItsImage(t *testing.T) {
+	backend := newFakeBackend()
+
+	first := NewManager(backend, WithClock(newFakeClock()), WithImage("alpine:3"))
+	box, err := first.Open("work")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	mustExec(t, box)
+	box.Close()
+	first.Close()
+
+	second := NewManager(backend, WithClock(newFakeClock()), WithImage("golang:1.26"))
+	t.Cleanup(func() { second.Close() })
+	resumed, err := second.Open("work")
+	if err != nil {
+		t.Fatalf("Open on the second manager: %v", err)
+	}
+	t.Cleanup(func() { resumed.Close() })
+	mustExec(t, resumed)
+
+	if got := backend.imageOf("work"); got != "alpine:3" {
+		t.Errorf("sandbox image = %q, want the %q it was created from", got, "alpine:3")
+	}
+}
+
 func TestOpenRequiresName(t *testing.T) {
 	m, _, _ := newTestManager(t)
 
-	if _, err := m.Open(agent.SandboxSpec{Image: "test:latest"}); !errors.Is(err, ErrNameRequired) {
+	if _, err := m.Open(""); !errors.Is(err, ErrNameRequired) {
 		t.Fatalf("Open without a name: err = %v, want ErrNameRequired", err)
 	}
 }

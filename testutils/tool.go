@@ -78,3 +78,35 @@ func (t *RecordingTool) Execute(_ context.Context, _ *agent.ExecCtx, input json.
 	t.Inputs = append(t.Inputs, input)
 	return t.Result, nil
 }
+
+// ExecTool runs the command it is given in the sandbox it is dispatched with,
+// and reports that sandbox's stdout as the tool result. Loop tests use it to
+// follow a tool call all the way to a sandbox, which RecordingTool stops short
+// of.
+type ExecTool struct{ ToolName string }
+
+func (t *ExecTool) Definition() model.ToolDefinition {
+	return model.ToolDefinition{
+		Name:        t.ToolName,
+		Description: "runs a command in the sandbox; test double",
+		Schema: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"cmd": map[string]any{"type": "string"}},
+			"required":   []string{"cmd"},
+		},
+	}
+}
+
+func (t *ExecTool) Execute(ctx context.Context, ec *agent.ExecCtx, input json.RawMessage) (agent.ToolResult, error) {
+	var args struct {
+		Cmd string `json:"cmd"`
+	}
+	if err := json.Unmarshal(input, &args); err != nil {
+		return agent.ToolResult{}, err
+	}
+	res, err := ec.Sandbox.Exec(ctx, agent.Command{Cmd: "sh", Args: []string{"-c", args.Cmd}})
+	if err != nil {
+		return agent.ToolResult{}, err
+	}
+	return agent.ToolResult{Content: res.Stdout}, nil
+}

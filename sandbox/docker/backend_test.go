@@ -12,8 +12,8 @@ import (
 
 const testImage = "alpine:test"
 
-func spec(name string) agent.SandboxSpec {
-	return agent.SandboxSpec{Name: name, Image: testImage}
+func spec(name string) sandbox.Spec {
+	return sandbox.Spec{Name: name, Image: testImage}
 }
 
 // TestEnsureReadyCreatesAndStartsAnAbsentSandbox is the first-command case: a
@@ -167,7 +167,7 @@ func TestEnsureReadyNeedsAnImageOnlyToCreate(t *testing.T) {
 		d := newFakeDaemon()
 		b := newBackend(d)
 
-		if err := b.EnsureReady(context.Background(), agent.SandboxSpec{Name: "work"}); err == nil {
+		if err := b.EnsureReady(context.Background(), sandbox.Spec{Name: "work"}); err == nil {
 			t.Error("creating a sandbox with no image should be rejected")
 		}
 		if d.count("ContainerCreate") != 0 {
@@ -180,7 +180,7 @@ func TestEnsureReadyNeedsAnImageOnlyToCreate(t *testing.T) {
 		b := newBackend(d)
 		d.addContainer(b.container("work"), testImage, false, map[string]string{Label: "work"})
 
-		if err := b.EnsureReady(context.Background(), agent.SandboxSpec{Name: "work"}); err != nil {
+		if err := b.EnsureReady(context.Background(), sandbox.Spec{Name: "work"}); err != nil {
 			t.Errorf("an existing sandbox needs no image, got: %v", err)
 		}
 		if _, running := d.state(b.container("work")); !running {

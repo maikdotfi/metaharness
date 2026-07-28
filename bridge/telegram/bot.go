@@ -33,9 +33,10 @@ const defaultEditGap = 700 * time.Millisecond
 const typingInterval = 4 * time.Second
 
 // SessionFactory returns a fresh session with a new opaque ID, the chosen model,
-// an active status, and any desired sandbox specification. It keeps model and
-// sandbox selection in the assembling application.
-type SessionFactory func() *agent.Session
+// and the sandbox it runs in. It keeps model and sandbox selection in the
+// assembling application; opening a sandbox can fail, and the bridge reports
+// that rather than starting a task with nowhere to work.
+type SessionFactory func() (*agent.Session, error)
 
 // Config configures the personal bridge.
 type Config struct {
@@ -106,6 +107,11 @@ func Run(ctx context.Context, cfg Config) error {
 		allowed[id] = true
 	}
 
+	first, err := cfg.NewSession()
+	if err != nil {
+		return fmt.Errorf("telegram: starting the first session: %w", err)
+	}
+
 	pb := &personalBot{
 		agent:        cfg.Agent,
 		newSession:   cfg.NewSession,
@@ -113,8 +119,16 @@ func Run(ctx context.Context, cfg Config) error {
 		showThinking: cfg.ShowThinking,
 		editGap:      defaultEditGap,
 		now:          time.Now,
-		current:      cfg.NewSession(),
+		current:      first,
 	}
+	// The bridge made these sessions, so the bridge releases their handles on the
+	// way out. The sandboxes themselves keep running: they belong to whoever owns
+	// the manager, and outliving this process is the point of them.
+	defer func() {
+		pb.mu.Lock()
+		defer pb.mu.Unlock()
+		pb.closeCurrent()
+	}()
 
 	opts := []bot.Option{
 		// Only message updates; unsupported update types never reach us.
@@ -203,18 +217,39 @@ func (b *personalBot) handleCommand(ctx context.Context, chatID int64, cmd strin
 
 	switch cmd {
 	case "/new", "/clear":
-		b.current = b.newSession()
-		b.send(ctx, chatID, "Started a fresh session: "+b.current.ID)
+		next, err := b.newSession()
+		if err != nil {
+			// The current session is still perfectly usable, so keep it rather
+			// than leaving the chat with nothing to talk to.
+			b.send(ctx, chatID, "Sorry, I couldn't start a fresh session: "+err.Error())
+			return
+		}
+		b.closeCurrent()
+		b.current = next
+		b.send(ctx, chatID, "Started a fresh session: "+next.ID)
 	case "/status":
 		s := b.current
 		b.send(ctx, chatID, fmt.Sprintf(
-			"session %s\nmodel %s\nmessages %d\ntokens: %d in / %d out",
-			s.ID, s.Model, len(s.Messages), s.Usage.InputTokens, s.Usage.OutputTokens,
+			"session %s\nsandbox %s\nmodel %s\nmessages %d\ntokens: %d in / %d out",
+			s.ID, s.SandboxName(), s.Model, len(s.Messages), s.Usage.InputTokens, s.Usage.OutputTokens,
 		))
 	case "/help", "/start":
 		b.send(ctx, chatID, helpText)
 	default:
 		b.send(ctx, chatID, "Unknown command.\n\n"+helpText)
+	}
+}
+
+// closeCurrent releases the current session's handle on its sandbox. Call it
+// with the turn lock held, or from a point where no turn can start. A failure is
+// logged and nothing more: a handle is a reference, and dropping it changes
+// nothing about the sandbox.
+func (b *personalBot) closeCurrent() {
+	if b.current == nil {
+		return
+	}
+	if err := b.current.Close(); err != nil {
+		slog.Warn("releasing the session's sandbox failed", "session", b.current.ID, "err", err)
 	}
 }
 
