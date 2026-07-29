@@ -91,6 +91,15 @@ box, err := sandboxes.Open(name)
 sess := agent.NewSession(id, modelID, box)
 ```
 
+The Telegram bridge grew the same pair and lost it the same way. `Config.Sessions`
+and `Config.Resume` were two fields whose doc explained that each was
+"independently optional" — an offer no caller ever took up, and one the bridge
+then had to reconcile in `helpText` and `listSessions`. They are now one field,
+`Sessions agent.Sessions`, filled by `a.Sessions(sandboxes)`: because resuming is
+Load, Open and Bind in that order, the library does those three steps once
+(`agent/sessions.go`) instead of every persisting application writing them out and
+one of them forgetting `Bind`.
+
 **Generally:** two options the caller has to set together, in the right order,
 with matching values, are one thing wearing two hats. Options are for what a
 caller may *omit*. Anything mandatory belongs in the signature, where the
@@ -192,6 +201,12 @@ doing work the library should do.
   and three more like it — and both assemble the identical `model.Config` from
   the identical environment variables. Repetition across every caller is the
   library's job, not theirs.
+- **`examples/telegram-chat/main.go:179`** builds a `[]agent.Option` and appends
+  to it because one option depends on a flag. Whether to persist is the
+  application's choice; the slice is not — it is there because there is no way to
+  say "no store" as a *value*, and `WithStore` given a nil `*turso.Store` would
+  leave the agent holding a non-nil interface over a nil pointer, which is worse
+  than the append. The trap is the finding, not the two lines.
 - **`sandbox.WithImage` on a local manager does nothing.** One option vocabulary
   serving every backend is the acknowledged price of choosing a backend by name
   (`sandbox/registry.go:17`), but it is a price, and a caller reading the flag

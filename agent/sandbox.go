@@ -29,3 +29,12 @@ type Sandbox interface {
 	Exec(ctx context.Context, cmd Command) (ExecResult, error)
 	Close() error
 }
+
+// SandboxOpener hands out a handle to the sandbox with a given name, creating it
+// if it is not there yet. It is the one thing package agent needs from whoever
+// owns the sandboxes — a *sandbox.Manager is one — and it is declared here so
+// that dependency points one way: sandboxes know about sessions, not the
+// reverse.
+type SandboxOpener interface {
+	Open(name string) (Sandbox, error)
+}

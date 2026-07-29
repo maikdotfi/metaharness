@@ -36,9 +36,11 @@ type SessionInfo struct {
 // process, and nothing that cannot. A live sandbox handle is not one of them.
 //
 // It exists so a store can be written outside package agent. A session keeps its
-// sandbox name unexported on purpose — the only thing that changes the name is
-// Bind, which refuses a sandbox the session did not record — and a record is how
-// that name reaches storage without handing callers a field to reassign.
+// sandbox name unexported on purpose — the only thing that changes the name on a
+// live session is Bind, which refuses a sandbox the session did not record — and
+// a record is how that name reaches storage anyway. Reassigning Sandbox on a
+// record does not move a running task: what comes back from Session is unbound,
+// so Bind still decides which filesystem it runs in.
 type SessionRecord struct {
 	ID       string
 	Model    string
@@ -48,16 +50,24 @@ type SessionRecord struct {
 	Messages []fantasy.Message
 }
 
-// Record returns what a store should write down for s.
+// Record returns what a store should write down for s, as of now.
+//
+// The transcript is copied, like the one Session hands back: a store that keeps
+// the record would otherwise keep the running session's array with it, and see
+// later turns appear in what it already wrote down.
 func (s *Session) Record() SessionRecord {
-	return SessionRecord{
-		ID:       s.ID,
-		Model:    s.Model,
-		Status:   s.Status,
-		Usage:    s.Usage,
-		Sandbox:  s.name,
-		Messages: s.Messages,
+	rec := SessionRecord{
+		ID:      s.ID,
+		Model:   s.Model,
+		Status:  s.Status,
+		Usage:   s.Usage,
+		Sandbox: s.name,
 	}
+	if s.Messages != nil {
+		rec.Messages = make([]fantasy.Message, len(s.Messages))
+		copy(rec.Messages, s.Messages)
+	}
+	return rec
 }
 
 // Session rebuilds the session r describes. It comes back unbound, which is what

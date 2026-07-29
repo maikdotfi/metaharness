@@ -249,11 +249,13 @@ thing, so the name is the only part that is written:
 type sandboxName string
 ```
 
-Restoring is therefore two steps, both in the application, where the manager is:
+Restoring is therefore load, open, bind — three steps that mean nothing apart, so
+`Agent.Sessions(boxes)` does them (`agent/sessions.go`) and an application hands
+over the manager instead of writing them out:
 
 ```go
 sess, err := store.Load(ctx, id)                   // has a name, no handle
-box, err := sandboxManager.Open(sess.SandboxName())
+box, err := boxes.Open(sess.SandboxName())         // agent.SandboxOpener; a *Manager is one
 err = sess.Bind(box)                               // ErrSandboxMismatch on a different name
 ```
 

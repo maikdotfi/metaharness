@@ -436,21 +436,23 @@ func TestContextCancellationStopsActiveRun(t *testing.T) {
 // --- /sessions and /resume ---------------------------------------------------
 
 // newResumableTestBot wires a bridge whose sessions are retained, so /sessions
-// has something to list and /resume something to bring back. The resume function
-// is the one an application writes: load the session, then bind it to the sandbox
-// it recorded.
+// has something to list and /resume something to bring back — the wiring an
+// application does when it gives its agent a store.
 func newResumableTestBot(t *testing.T, m model.ModelClient) (*personalBot, *fakeAPI) {
 	t.Helper()
-	store := &testutils.MemStore{}
+	boxes := &testutils.FakeSandboxes{}
 	a := agent.New("test system prompt",
 		agent.WithModel(m),
-		agent.WithStore(store),
+		agent.WithStore(&testutils.MemStore{}),
 		agent.WithTools(agent.Adapt(tools.Bash{})),
 	)
 	var n int
 	factory := func() (*agent.Session, error) {
+		box, err := boxes.Open("work")
+		if err != nil {
+			return nil, err
+		}
 		n++
-		box := &testutils.FakeSandbox{SandboxName: "work"}
 		return agent.NewSession(fmt.Sprintf("sess_%d", n), "test-model", box), nil
 	}
 	first, err := factory()
@@ -462,18 +464,11 @@ func newResumableTestBot(t *testing.T, m model.ModelClient) (*personalBot, *fake
 		agent:      a,
 		api:        api,
 		newSession: factory,
-		sessions:   store,
-		resume: func(ctx context.Context, id string) (*agent.Session, error) {
-			sess, err := store.Load(ctx, id)
-			if err != nil {
-				return nil, err
-			}
-			return sess, sess.Bind(&testutils.FakeSandbox{SandboxName: sess.SandboxName()})
-		},
-		allowed: map[int64]bool{allowedUser: true},
-		editGap: 0,
-		now:     time.Now,
-		current: first,
+		sessions:   a.Sessions(boxes),
+		allowed:    map[int64]bool{allowedUser: true},
+		editGap:    0,
+		now:        time.Now,
+		current:    first,
 	}
 	return pb, api
 }
@@ -587,6 +582,26 @@ func TestSessionsWithoutRetentionSaysSo(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(got), "history") {
 		t.Errorf("/sessions = %q, want it to say no history is kept", got)
+	}
+}
+
+// TestResumeWithoutRetentionSaysSo is the other half of the same nil: a bridge
+// given no history explains that rather than reporting a missing session.
+func TestResumeWithoutRetentionSaysSo(t *testing.T) {
+	pb, api := newTestBot(t, &testutils.ScriptedModel{}, false)
+
+	before := pb.current
+	pb.handleUpdate(context.Background(), privateText(allowedUser, 100, "/resume sess_1"))
+
+	if pb.current != before {
+		t.Error("a resume the bridge cannot do replaced the working session")
+	}
+	got := lastSent(t, api)
+	if strings.Contains(got, "Unknown command") {
+		t.Errorf("/resume = %q, want an explanation rather than an unknown command", got)
+	}
+	if !strings.Contains(got, "cannot resume") {
+		t.Errorf("/resume = %q, want it to say resuming is not available", got)
 	}
 }
 

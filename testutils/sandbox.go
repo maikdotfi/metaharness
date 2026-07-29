@@ -75,3 +75,34 @@ func (f *FakeSandbox) Closes() int {
 	defer f.mu.Unlock()
 	return f.closes
 }
+
+// FakeSandboxes opens FakeSandbox handles by name, minting one on first ask and
+// handing out the same sandbox for that name afterwards — which is what makes a
+// resumed session land in the filesystem it recorded. It stands in for a
+// sandbox.Manager wherever a test needs somewhere to open sandboxes.
+type FakeSandboxes struct {
+	// OpenErr fails every Open, standing in for a backend nothing can reach.
+	OpenErr error
+
+	mu    sync.Mutex
+	boxes map[string]*FakeSandbox
+}
+
+var _ agent.SandboxOpener = (*FakeSandboxes)(nil)
+
+func (m *FakeSandboxes) Open(name string) (agent.Sandbox, error) {
+	if m.OpenErr != nil {
+		return nil, m.OpenErr
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.boxes == nil {
+		m.boxes = make(map[string]*FakeSandbox)
+	}
+	box, ok := m.boxes[name]
+	if !ok {
+		box = &FakeSandbox{SandboxName: name}
+		m.boxes[name] = box
+	}
+	return box, nil
+}

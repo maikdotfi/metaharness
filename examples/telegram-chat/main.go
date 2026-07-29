@@ -185,9 +185,9 @@ func run(ctx context.Context, opt options) error {
 			agent.Adapt(tools.WriteFile{}),
 		),
 	}
-	var store *turso.Store
 	if opt.dbPath != "" {
-		if store, err = turso.Open(ctx, opt.dbPath); err != nil {
+		store, err := turso.Open(ctx, opt.dbPath)
+		if err != nil {
 			return err
 		}
 		defer store.Close()
@@ -207,31 +207,15 @@ func run(ctx context.Context, opt options) error {
 		return agent.NewSession(newSessionID(), opt.modelID, box), nil
 	}
 
-	bridge := telegram.Config{
+	return telegram.Run(ctx, telegram.Config{
 		Token:        opt.token,
 		Agent:        a,
 		NewSession:   newSession,
 		AllowedUsers: opt.allowed,
 		ShowThinking: opt.showThinking,
-	}
-	if store != nil {
-		bridge.Sessions = store
-		// A stored session comes back with the name of the sandbox it ran in and
-		// no live handle. Opening that name is what puts the task back in the
-		// filesystem it started in; Bind refuses anything else.
-		bridge.Resume = func(ctx context.Context, id string) (*agent.Session, error) {
-			sess, err := store.Load(ctx, id)
-			if err != nil {
-				return nil, err
-			}
-			box, err := sandboxManager.Open(sess.SandboxName())
-			if err != nil {
-				return nil, err
-			}
-			return sess, sess.Bind(box)
-		}
-	}
-	return telegram.Run(ctx, bridge)
+		// Nil without -db: no stored history, and so no /sessions or /resume.
+		Sessions: a.Sessions(sandboxManager),
+	})
 }
 
 // parseAllowedUsers reads a comma-separated list of numeric Telegram user ids.

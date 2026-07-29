@@ -38,12 +38,6 @@ const typingInterval = 4 * time.Second
 // that rather than starting a task with nowhere to work.
 type SessionFactory func() (*agent.Session, error)
 
-// SessionResumer returns the stored session with the given id, bound to the
-// sandbox it recorded and ready to run. It is the mirror of SessionFactory, and
-// it is the application's for the same reason: only the application knows where
-// sessions are stored and how to reach a sandbox by name.
-type SessionResumer func(ctx context.Context, id string) (*agent.Session, error)
-
 // Config configures the personal bridge.
 type Config struct {
 	Token        string
@@ -51,14 +45,10 @@ type Config struct {
 	NewSession   SessionFactory
 	AllowedUsers []int64
 
-	// Sessions and Resume are what a bridge over a durable store can offer, and
-	// each is independently optional: listing sessions is useful without resuming
-	// them, and resuming a known id is useful without a list. Leave both unset —
-	// the storage-free default — and neither command is offered.
-	//
-	// A store that implements agent.SessionLister satisfies Sessions directly.
-	Sessions agent.SessionLister
-	Resume   SessionResumer
+	// Sessions is the stored history /sessions lists and /resume brings back,
+	// which an agent hands over with a.Sessions(sandboxes). Nil — the
+	// storage-free default — and neither command is offered.
+	Sessions agent.Sessions
 
 	// ShowThinking includes the model's raw reasoning text in the progress
 	// status message. Progress itself is always reported and is not optional;
@@ -99,8 +89,7 @@ type personalBot struct {
 	agent        *agent.Agent
 	api          telegramAPI
 	newSession   SessionFactory
-	sessions     agent.SessionLister // nil when nothing is retained
-	resume       SessionResumer      // nil when nothing can be resumed
+	sessions     agent.Sessions // nil when nothing is retained
 	allowed      map[int64]bool
 	showThinking bool
 
@@ -133,7 +122,6 @@ func Run(ctx context.Context, cfg Config) error {
 		agent:        cfg.Agent,
 		newSession:   cfg.NewSession,
 		sessions:     cfg.Sessions,
-		resume:       cfg.Resume,
 		allowed:      allowed,
 		showThinking: cfg.ShowThinking,
 		editGap:      defaultEditGap,
@@ -222,8 +210,8 @@ func splitCommand(text string) (cmd, arg string) {
 const sessionListLimit = 10
 
 // helpText describes only the commands this bridge can actually run: /sessions
-// and /resume exist just for an application that wired a store, and offering them
-// otherwise would be advertising a capability that is not there.
+// and /resume exist for an application that handed over stored history, and
+// offering them otherwise would advertise a capability that is not there.
 func (b *personalBot) helpText() string {
 	var h strings.Builder
 	h.WriteString("I run a Meta Harness agent. Just send a message to give it a task.\n\nCommands:\n")
@@ -231,8 +219,6 @@ func (b *personalBot) helpText() string {
 	h.WriteString("/status — show the current session id, model, message count, and token usage\n")
 	if b.sessions != nil {
 		h.WriteString("/sessions — list the sessions that can be resumed\n")
-	}
-	if b.resume != nil {
 		h.WriteString("/resume <id> — continue a stored session where it left off\n")
 	}
 	h.WriteString("/help, /start — show this help")
@@ -301,9 +287,7 @@ func (b *personalBot) listSessions(ctx context.Context, chatID int64) {
 			out.WriteString(" (current)")
 		}
 	}
-	if b.resume != nil {
-		out.WriteString("\n\nSend /resume <id> to continue one.")
-	}
+	out.WriteString("\n\nSend /resume <id> to continue one.")
 	b.send(ctx, chatID, out.String())
 }
 
@@ -311,7 +295,7 @@ func (b *personalBot) listSessions(ctx context.Context, chatID int64) {
 // leaves the working session in place: the chat keeps something to talk to, which
 // is the same choice /new makes.
 func (b *personalBot) resumeSession(ctx context.Context, chatID int64, id string) {
-	if b.resume == nil {
+	if b.sessions == nil {
 		b.send(ctx, chatID, "This bridge cannot resume sessions.")
 		return
 	}
@@ -324,7 +308,7 @@ func (b *personalBot) resumeSession(ctx context.Context, chatID int64, id string
 		return
 	}
 
-	next, err := b.resume(ctx, id)
+	next, err := b.sessions.Resume(ctx, id)
 	if err != nil {
 		if errors.Is(err, agent.ErrNotFound) {
 			b.send(ctx, chatID, fmt.Sprintf("I have no session called %q.", id))

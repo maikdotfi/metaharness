@@ -55,6 +55,21 @@ func TestRecordRoundTripsASession(t *testing.T) {
 	}
 }
 
+// TestARecordIsASnapshotOfTheTranscript stops a store that keeps the record it
+// was given from keeping the running session's array with it. Appending is not
+// the only thing that happens to a transcript; rewriting a message must not
+// reach back into what was already written down.
+func TestARecordIsASnapshotOfTheTranscript(t *testing.T) {
+	sess := testutils.UserSession("s1", "fake-model", &testutils.FakeSandbox{SandboxName: "work"}, "hi")
+	rec := sess.Record()
+
+	sess.Messages[0] = testutils.AssistantText("rewritten")
+
+	if !reflect.DeepEqual(rec.Messages[0], fantasy.NewUserMessage("hi")) {
+		t.Errorf("the record's first message is now %#v: it aliases the live transcript", rec.Messages[0])
+	}
+}
+
 // TestSessionWithoutMessagesStaysWithoutMessages keeps an empty session from
 // becoming an empty-but-allocated one, so a store round trip compares equal to
 // the session it was given.
