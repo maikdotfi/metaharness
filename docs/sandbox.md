@@ -169,15 +169,16 @@ a := agent.New(systemPrompt,
 	agent.WithTools(/* … */),
 )
 
-// Every task gets a new id and opens the same named sandbox again, so /new
-// discards the conversation and keeps the files.
-newSession := func() (*agent.Session, error) {
-	box, err := sandboxManager.Open(opt.sandboxName)
-	if err != nil {
-		return nil, err
-	}
-	return agent.NewSession(newSessionID(), opt.modelID, box), nil
-}
+// The bridge starts the tasks, because /new is a Telegram command. It is told
+// where sandboxes live and which one to work in, and opens that same name again
+// for every task, so a reset discards the conversation and keeps the files.
+return telegram.Run(ctx, telegram.Config{
+	Agent:       a,
+	Sandboxes:   sandboxManager,
+	SandboxName: opt.sandboxName,
+	Model:       opt.modelID,
+	/* … */
+})
 ```
 
 Three owners, three lifetimes, and no third party holding a sandbox on anyone

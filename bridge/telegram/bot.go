@@ -3,12 +3,15 @@
 // listener, and keeps one current agent session in memory.
 //
 // It is deliberately a Telegram integration, not a generic bridge or transport
-// framework: the assembling application owns model, tools, sandbox, and prompt,
-// and hands this package a wired *agent.Agent plus a factory for fresh sessions.
+// framework: the assembling application owns model, tools, prompt and where
+// sandboxes live; the bridge starts the tasks, because /new is a Telegram
+// command.
 package telegram
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -32,23 +35,23 @@ const defaultEditGap = 700 * time.Millisecond
 // clears the action after ~5s, so we refresh a little sooner.
 const typingInterval = 4 * time.Second
 
-// SessionFactory returns a fresh session with a new opaque ID, the chosen model,
-// and the sandbox it runs in. It keeps model and sandbox selection in the
-// assembling application; opening a sandbox can fail, and the bridge reports
-// that rather than starting a task with nowhere to work.
-type SessionFactory func() (*agent.Session, error)
-
 // Config configures the personal bridge.
 type Config struct {
-	Token        string
-	Agent        *agent.Agent
-	NewSession   SessionFactory
-	AllowedUsers []int64
+	Token string
+	Agent *agent.Agent
 
-	// Sessions is the stored history /sessions lists and /resume brings back,
-	// which an agent hands over with a.Sessions(sandboxes). Nil — the
-	// storage-free default — and neither command is offered.
-	Sessions agent.Sessions
+	// Sandboxes is where the bridge opens sandboxes — a *sandbox.Manager is one —
+	// and SandboxName the one to work in. Every task opens that same name, so /new
+	// discards the conversation and keeps the files. The bridge releases its
+	// handles and destroys nothing: the sandboxes outlive it.
+	Sandboxes   agent.SandboxOpener
+	SandboxName string
+
+	// Model is the model id every session starts on, within the provider the
+	// agent talks to.
+	Model string
+
+	AllowedUsers []int64
 
 	// ShowThinking includes the model's raw reasoning text in the progress
 	// status message. Progress itself is always reported and is not optional;
@@ -64,8 +67,14 @@ func (c Config) validate() error {
 	if c.Agent == nil {
 		return errors.New("telegram: nil Agent")
 	}
-	if c.NewSession == nil {
-		return errors.New("telegram: nil NewSession")
+	if c.Sandboxes == nil {
+		return errors.New("telegram: nil Sandboxes: nowhere to open the sandbox to work in")
+	}
+	if strings.TrimSpace(c.SandboxName) == "" {
+		return errors.New("telegram: empty SandboxName")
+	}
+	if strings.TrimSpace(c.Model) == "" {
+		return errors.New("telegram: empty Model")
 	}
 	if len(c.AllowedUsers) == 0 {
 		return errors.New("telegram: at least one allowed user required")
@@ -88,7 +97,9 @@ type telegramAPI interface {
 type personalBot struct {
 	agent        *agent.Agent
 	api          telegramAPI
-	newSession   SessionFactory
+	boxes        agent.SandboxOpener
+	sandboxName  string
+	modelID      string
 	sessions     agent.Sessions // nil when nothing is retained
 	allowed      map[int64]bool
 	showThinking bool
@@ -100,12 +111,13 @@ type personalBot struct {
 	current *agent.Session
 }
 
-// Run assembles the bridge and blocks, polling Telegram until ctx is cancelled.
-// It never starts an HTTP listener. Invalid configuration fails before polling
-// begins.
-func Run(ctx context.Context, cfg Config) error {
+// newBridge validates cfg and starts the first session, so a bridge either has
+// somewhere to work or does not exist. Whether /sessions and /resume are offered
+// is decided here too, by asking the agent for the history it retains: an agent
+// with the default store has none, and then neither command is advertised.
+func newBridge(cfg Config) (*personalBot, error) {
 	if err := cfg.validate(); err != nil {
-		return err
+		return nil, err
 	}
 
 	allowed := make(map[int64]bool, len(cfg.AllowedUsers))
@@ -113,20 +125,55 @@ func Run(ctx context.Context, cfg Config) error {
 		allowed[id] = true
 	}
 
-	first, err := cfg.NewSession()
-	if err != nil {
-		return fmt.Errorf("telegram: starting the first session: %w", err)
-	}
-
 	pb := &personalBot{
 		agent:        cfg.Agent,
-		newSession:   cfg.NewSession,
-		sessions:     cfg.Sessions,
+		boxes:        cfg.Sandboxes,
+		sandboxName:  cfg.SandboxName,
+		modelID:      cfg.Model,
+		sessions:     cfg.Agent.Sessions(cfg.Sandboxes),
 		allowed:      allowed,
 		showThinking: cfg.ShowThinking,
 		editGap:      defaultEditGap,
 		now:          time.Now,
-		current:      first,
+	}
+
+	first, err := pb.startSession()
+	if err != nil {
+		return nil, fmt.Errorf("telegram: starting the first session: %w", err)
+	}
+	pb.current = first
+	return pb, nil
+}
+
+// startSession begins a task with a fresh id in the sandbox the bridge works in,
+// opening it if it is not there yet. Opening can fail, and a caller that already
+// has a working session keeps it rather than being left with nowhere to work.
+func (b *personalBot) startSession() (*agent.Session, error) {
+	box, err := b.boxes.Open(b.sandboxName)
+	if err != nil {
+		return nil, err
+	}
+	return agent.NewSession(newSessionID(), b.modelID, box), nil
+}
+
+// newSessionID returns an opaque local identifier. It deliberately encodes no
+// Telegram bot, chat, or user id.
+func newSessionID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// A readable panic beats a predictable id.
+		panic("telegram: reading random bytes: " + err.Error())
+	}
+	return "sess_" + hex.EncodeToString(b[:])
+}
+
+// Run assembles the bridge and blocks, polling Telegram until ctx is cancelled.
+// It never starts an HTTP listener. Invalid configuration, and a sandbox that
+// cannot be opened at all, fail before polling begins.
+func Run(ctx context.Context, cfg Config) error {
+	pb, err := newBridge(cfg)
+	if err != nil {
+		return err
 	}
 	// The bridge made these sessions, so the bridge releases their handles on the
 	// way out. The sandboxes themselves keep running: they belong to whoever owns
@@ -162,7 +209,8 @@ func Run(ctx context.Context, cfg Config) error {
 		slog.Warn("telegram delete webhook failed", "err", err)
 	}
 
-	slog.Info("telegram bridge started", "session", pb.current.ID, "allowed_users", len(allowed))
+	slog.Info("telegram bridge started",
+		"session", pb.current.ID, "sandbox", pb.sandboxName, "allowed_users", len(pb.allowed))
 	b.Start(ctx) // blocks until ctx is cancelled
 	return ctx.Err()
 }
@@ -234,7 +282,7 @@ func (b *personalBot) handleCommand(ctx context.Context, chatID int64, cmd, arg 
 
 	switch cmd {
 	case "/new", "/clear":
-		next, err := b.newSession()
+		next, err := b.startSession()
 		if err != nil {
 			// The current session is still perfectly usable, so keep it rather
 			// than leaving the chat with nothing to talk to.

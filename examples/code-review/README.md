@@ -10,7 +10,7 @@ flowchart LR
     CLI[examples/code-review] --> Agent[agent.Agent]
     Config[model.Config] --> Model[model.New]
     Model --> Agent
-    Discard[agent.DiscardStore] --> Agent
+    Store["agentdb/turso.Store\nsessions.db"] --> Agent
     OSTools["bash · read_file · edit_file · write_file"] --> Agent
     Skill["skill · grug-review"] --> Agent
 
@@ -35,9 +35,12 @@ m, _ := model.New(model.Config{
     APIKey:   os.Getenv("ANTHROPIC_API_KEY"),
 })
 
+store, _ := turso.Open(ctx, "sessions.db")
+defer store.Close()
+
 a := agent.New(systemPrompt,
     agent.WithModel(m),
-    agent.WithStore(agent.DiscardStore{}),
+    agent.WithStore(store),
     agent.WithTools(
         agent.Adapt(tools.Bash{}),
         agent.Adapt(tools.ReadFile{}),
@@ -96,7 +99,7 @@ sequenceDiagram
     participant Model as FantasyModel / Anthropic
     participant Tool as selected tool
     participant Box as sandbox.Manager
-    participant Store as DiscardStore
+    participant Store as turso.Store
 
     App->>Box: Open("checkout")
     Box-->>App: sandbox handle
@@ -129,10 +132,10 @@ A finished turn leaves the sandbox alone: the handle belongs to the session, and
 the sandbox keeps running until the manager's idle policy or a `Destroy` says
 otherwise.
 
-`DiscardStore.Save` succeeds without retaining checkpoints, so the live
-session is the only transcript. Applications that want persistence pass
-`agentdb/turso.Store` through `agent.WithStore`; linking that store is what
-brings the database driver in, so a run like this one never touches it.
+The store is checkpointed on every turn, so `sessions.db` holds the whole
+review — session row plus transcript — after the process exits. There is no
+flag for it: linking `agentdb/turso.Store` is what brings the database driver
+in, and this example always does.
 
 ```text
 Session = ID + model ID + fantasy messages + token usage + status + its sandbox
@@ -163,6 +166,8 @@ You can provide these flags to change the defaults without touching code:
 -workdir  tool working directory   (default: checkout)
 -prompt   initial user message     (there is a default one too)
 ```
+
+The run writes `sessions.db` next to this README; delete it to start clean.
 
 The [`checkout/`](checkout/) package is intentionally imperfect and has its
 own `go.mod`. Its failing quantity-validation test remains outside the root

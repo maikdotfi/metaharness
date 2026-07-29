@@ -172,18 +172,66 @@ methods that look identical are how callers leak or delete.
 ### 7. Signatures that admit what can fail
 
 ```go
-type SessionFactory func() *agent.Session            // before
-type SessionFactory func() (*agent.Session, error)   // after
+Open(name string) *agent.Sandbox            // before
+Open(name string) (agent.Sandbox, error)    // after
 ```
 
-Opening a sandbox can fail. The old signature forced the bridge to start a task
-with nowhere to work; the new one lets `/new` keep the working session and say
-so. An honest signature is cheaper than the recovery code its absence needs.
+Opening a sandbox can fail: a daemon is down, an image is missing. The dishonest
+signature forces whoever starts a task to do it with nowhere to work; the honest
+one lets `/new` keep the working session and say what went wrong
+(`bridge/telegram/bot.go`, `startSession`). An honest signature is cheaper than
+the recovery code its absence needs.
 
 Also in this category: making a required pass lazy instead of documenting it.
 `Reconcile` used to be a call the application had to remember, and forgetting it
 leaked compute. Adoption now happens inside `entryFor`; `Reconcile` stays
 exported only for the report and the timing.
+
+### 8. A callback is work handed back to the caller
+
+```go
+type SessionFactory func() (*agent.Session, error)   // before: the app wrote this
+
+newSession := func() (*agent.Session, error) {       // …and this, in main
+	box, err := sandboxManager.Open(opt.sandboxName)
+	if err != nil {
+		return nil, err
+	}
+	return agent.NewSession(newSessionID(), opt.modelID, box), nil
+}
+telegram.Run(ctx, telegram.Config{
+	NewSession: newSession,
+	Sessions:   a.Sessions(sandboxManager),          // the same manager, again
+	/* … */
+})
+```
+
+```go
+telegram.Run(ctx, telegram.Config{                   // after
+	Sandboxes:   sandboxManager,
+	SandboxName: opt.sandboxName,
+	Model:       opt.modelID,
+	/* … */
+})
+```
+
+The factory had an honest signature and a good doc comment, and was still a
+defect: `/new` is a Telegram command, so starting a task is the bridge's own
+work, and the callback was the bridge asking the application to do it. What the
+application actually knows is three scalars — where sandboxes live, which one to
+work in, which model — and the bridge assembles the rest.
+
+Two things fell out of removing it. The application stopped minting session ids
+(sixteen lines of `crypto/rand`, and a naming scheme no application should have
+an opinion about — nothing outside the bridge ever sees them). And `Sessions`
+stopped being a field: it was the same manager arriving a second time, so the
+bridge now derives it with `cfg.Agent.Sessions(cfg.Sandboxes)` and decides on its
+own whether to advertise `/resume`.
+
+**Generally:** a callback in a config struct is a claim that the caller knows
+something the library cannot. Check that claim. If the closure's body only names
+library types — as this one did, `Open` then `NewSession` — the library was
+holding everything needed to write it.
 
 ---
 
@@ -201,7 +249,7 @@ doing work the library should do.
   and three more like it — and both assemble the identical `model.Config` from
   the identical environment variables. Repetition across every caller is the
   library's job, not theirs.
-- **`examples/telegram-chat/main.go:179`** builds a `[]agent.Option` and appends
+- **`examples/telegram-chat/main.go:177`** builds a `[]agent.Option` and appends
   to it because one option depends on a flag. Whether to persist is the
   application's choice; the slice is not — it is there because there is no way to
   say "no store" as a *value*, and `WithStore` given a nil `*turso.Store` would

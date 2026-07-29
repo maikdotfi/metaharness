@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/maikdotfi/metaharness/agent"
+	"github.com/maikdotfi/metaharness/agentdb/turso"
 	"github.com/maikdotfi/metaharness/model"
 	"github.com/maikdotfi/metaharness/sandbox"
 	"github.com/maikdotfi/metaharness/skills"
@@ -32,8 +33,10 @@ Before writing any feedback, load the grug-review skill with the skill tool and 
 
 const defaultPrompt = "Review this checkout package. Inspect the code and tests, run anything useful, and return review feedback with file and line references."
 
+const dbPath = "sessions.db"
+
 func main() {
-	modelID := flag.String("model", "gemma4:31b-cloud", "Anthropic model id")
+	modelName := flag.String("model", "gemma4:31b-cloud", "Anthropic model id")
 	workdir := flag.String("workdir", "checkout", "directory the agent's tools run in")
 	prompt := flag.String("prompt", defaultPrompt, "user prompt to start the review with")
 	think := flag.Bool("think", false, "enable extended thinking output")
@@ -43,12 +46,12 @@ func main() {
 	if os.Getenv("ANTHROPIC_API_KEY") == "" {
 		log.Fatal("ANTHROPIC_API_KEY is not set")
 	}
-	if err := run(context.Background(), *modelID, *workdir, *prompt, *think, *effort); err != nil {
+	if err := run(context.Background(), *modelName, *workdir, *prompt, *think, *effort); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(ctx context.Context, modelID, workdir, prompt string, think bool, effort string) error {
+func run(ctx context.Context, modelName, workdir, prompt string, think bool, effort string) error {
 	cfg := model.Config{
 		Provider: model.ProviderAnthropic,
 		APIKey:   os.Getenv("ANTHROPIC_API_KEY"),
@@ -70,15 +73,21 @@ func run(ctx context.Context, modelID, workdir, prompt string, think bool, effor
 	if root == "" {
 		root = "."
 	}
-	sandboxes, err := sandbox.New(sandbox.LocalKind, sandbox.WithRoot(root))
+	sandboxManager, err := sandbox.New(sandbox.LocalKind, sandbox.WithRoot(root))
 	if err != nil {
 		return err
 	}
-	defer sandboxes.Close()
+	defer sandboxManager.Close()
+
+	store, err := turso.Open(ctx, dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
 
 	a := agent.New(systemPrompt,
 		agent.WithModel(m),
-		agent.WithStore(agent.DiscardStore{}),
+		agent.WithStore(store),
 		agent.WithTools(
 			agent.Adapt(tools.Bash{}),
 			agent.Adapt(tools.ReadFile{}),
@@ -90,11 +99,11 @@ func run(ctx context.Context, modelID, workdir, prompt string, think bool, effor
 
 	// The session is the binding of this task to that sandbox, and it owns the
 	// handle: closing it releases the reference, never the sandbox.
-	box, err := sandboxes.Open(name)
+	box, err := sandboxManager.Open(name)
 	if err != nil {
 		return err
 	}
-	sess := agent.NewSession(fmt.Sprintf("review-%d", time.Now().Unix()), modelID, box)
+	sess := agent.NewSession(fmt.Sprintf("review-%d", time.Now().Unix()), modelName, box)
 	defer sess.Close()
 	sess.Messages = append(sess.Messages, model.NewUserMessage(prompt))
 	fmt.Printf("session %s in sandbox %s\n\n", sess.ID, sess.SandboxName())

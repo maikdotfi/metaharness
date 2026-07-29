@@ -2,7 +2,7 @@ package telegram
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -108,36 +108,38 @@ func privateText(userID, chatID int64, text string) *models.Update {
 
 const allowedUser = int64(42)
 
-// newTestBot wires a personalBot around a caller-supplied model, with an
-// in-memory factory that hands out incrementing session ids. editGap is 0 so
-// every progress step flushes, making edits deterministic.
+// newTestBot wires a bridge the way an application does — one Config — around a
+// caller-supplied model and a storage-free agent. editGap is 0 so every progress
+// step flushes, making edits deterministic.
 func newTestBot(t *testing.T, m model.ModelClient, showThinking bool) (*personalBot, *fakeAPI) {
 	t.Helper()
 	a := agent.New("test system prompt",
 		agent.WithModel(m),
 		agent.WithTools(agent.Adapt(tools.Bash{})),
 	)
-	var n int
-	factory := func() (*agent.Session, error) {
-		n++
-		box := &testutils.FakeSandbox{SandboxName: "work"}
-		return agent.NewSession(fmt.Sprintf("sess_%d", n), "test-model", box), nil
-	}
-	first, err := factory()
+	return newTestBridge(t, Config{
+		Token:        "test-token",
+		Agent:        a,
+		Sandboxes:    &testutils.FakeSandboxes{},
+		SandboxName:  "work",
+		Model:        "test-model",
+		AllowedUsers: []int64{allowedUser},
+		ShowThinking: showThinking,
+	})
+}
+
+// newTestBridge builds the bridge from cfg and swaps in the test's Telegram
+// double. Everything else — the first session, the id scheme, whether there is
+// resumable history — is the bridge's own doing, which is the point.
+func newTestBridge(t *testing.T, cfg Config) (*personalBot, *fakeAPI) {
+	t.Helper()
+	pb, err := newBridge(cfg)
 	if err != nil {
-		t.Fatalf("session factory: %v", err)
+		t.Fatalf("newBridge() error = %v", err)
 	}
 	api := &fakeAPI{}
-	pb := &personalBot{
-		agent:        a,
-		api:          api,
-		newSession:   factory,
-		allowed:      map[int64]bool{allowedUser: true},
-		showThinking: showThinking,
-		editGap:      0,
-		now:          time.Now,
-		current:      first,
-	}
+	pb.api = api
+	pb.editGap = 0
 	return pb, api
 }
 
@@ -152,6 +154,72 @@ func countEqual(ss []string, want string) int {
 }
 
 // --- tests -----------------------------------------------------------------
+
+// TestBridgeStartsItsOwnSessions pins what an application no longer writes: it
+// names the sandbox to work in and the model to work with, and the bridge starts
+// the first task, gives every later one a fresh id, and keeps them all in that
+// one filesystem.
+func TestBridgeStartsItsOwnSessions(t *testing.T) {
+	m := &testutils.ScriptedModel{Replies: []fantasy.Message{asstText("a")}}
+	pb, _ := newTestBot(t, m, false)
+	ctx := context.Background()
+
+	first := pb.current
+	if first == nil {
+		t.Fatal("the bridge has no session to talk to")
+	}
+	if first.ID == "" {
+		t.Error("the first session has no id")
+	}
+	if got := first.SandboxName(); got != "work" {
+		t.Errorf("first session works in %q, want the sandbox the bridge was given, %q", got, "work")
+	}
+
+	pb.handleUpdate(ctx, privateText(allowedUser, 100, "/new"))
+
+	if pb.current.ID == first.ID {
+		t.Errorf("/new reused id %q; every task gets its own", first.ID)
+	}
+	if got := pb.current.SandboxName(); got != "work" {
+		t.Errorf("the session after /new works in %q, want %q: /new keeps the files", got, "work")
+	}
+}
+
+// TestBridgeOffersHistoryItDerives is the pair of the resumable wiring: nothing
+// hands the bridge a session list, so /sessions can only work if the bridge asked
+// the agent it was given for one.
+func TestBridgeOffersHistoryItDerives(t *testing.T) {
+	m := &testutils.ScriptedModel{Replies: []fantasy.Message{asstText("a")}}
+	pb, api := newResumableTestBot(t, m)
+	ctx := context.Background()
+
+	pb.handleUpdate(ctx, privateText(allowedUser, 100, "do work"))
+	worked := pb.current.ID
+
+	pb.handleUpdate(ctx, privateText(allowedUser, 100, "/sessions"))
+
+	if got := lastSent(t, api); !strings.Contains(got, worked) {
+		t.Errorf("/sessions = %q, want it to list session %q", got, worked)
+	}
+}
+
+// TestBridgeWithoutSomewhereToWorkFailsToStart keeps a broken backend from
+// producing a bridge with nowhere to run: it is reported to the application that
+// can still act on it, not to a chat window later.
+func TestBridgeWithoutSomewhereToWorkFailsToStart(t *testing.T) {
+	a := agent.New("test system prompt", agent.WithModel(&testutils.ScriptedModel{}))
+	_, err := newBridge(Config{
+		Token:        "test-token",
+		Agent:        a,
+		Sandboxes:    &testutils.FakeSandboxes{OpenErr: errors.New("no backend")},
+		SandboxName:  "work",
+		Model:        "test-model",
+		AllowedUsers: []int64{allowedUser},
+	})
+	if err == nil {
+		t.Fatal("newBridge() succeeded with a sandbox opener that cannot open anything")
+	}
+}
 
 func TestAllowedTextReachesAgentAndReplies(t *testing.T) {
 	m := &testutils.ScriptedModel{Replies: []fantasy.Message{asstText("the answer")}}
@@ -437,40 +505,24 @@ func TestContextCancellationStopsActiveRun(t *testing.T) {
 
 // newResumableTestBot wires a bridge whose sessions are retained, so /sessions
 // has something to list and /resume something to bring back — the wiring an
-// application does when it gives its agent a store.
+// application does when it gives its agent a store. It hands over no history of
+// its own: an agent with a store and somewhere to open sandboxes is the whole of
+// what resuming takes.
 func newResumableTestBot(t *testing.T, m model.ModelClient) (*personalBot, *fakeAPI) {
 	t.Helper()
-	boxes := &testutils.FakeSandboxes{}
 	a := agent.New("test system prompt",
 		agent.WithModel(m),
 		agent.WithStore(&testutils.MemStore{}),
 		agent.WithTools(agent.Adapt(tools.Bash{})),
 	)
-	var n int
-	factory := func() (*agent.Session, error) {
-		box, err := boxes.Open("work")
-		if err != nil {
-			return nil, err
-		}
-		n++
-		return agent.NewSession(fmt.Sprintf("sess_%d", n), "test-model", box), nil
-	}
-	first, err := factory()
-	if err != nil {
-		t.Fatalf("session factory: %v", err)
-	}
-	api := &fakeAPI{}
-	pb := &personalBot{
-		agent:      a,
-		api:        api,
-		newSession: factory,
-		sessions:   a.Sessions(boxes),
-		allowed:    map[int64]bool{allowedUser: true},
-		editGap:    0,
-		now:        time.Now,
-		current:    first,
-	}
-	return pb, api
+	return newTestBridge(t, Config{
+		Token:        "test-token",
+		Agent:        a,
+		Sandboxes:    &testutils.FakeSandboxes{},
+		SandboxName:  "work",
+		Model:        "test-model",
+		AllowedUsers: []int64{allowedUser},
+	})
 }
 
 // lastSent is the text of the most recent reply, which for a command is the reply

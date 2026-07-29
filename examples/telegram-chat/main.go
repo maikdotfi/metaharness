@@ -24,8 +24,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"log"
@@ -197,24 +195,18 @@ func run(ctx context.Context, opt options) error {
 	// The agent holds no sandbox, which is why one can serve every session.
 	a := agent.New(systemPrompt, agentOptions...)
 
-	// Every task gets a new id and opens the same named sandbox again, so /new
-	// discards the conversation and keeps the files.
-	newSession := func() (*agent.Session, error) {
-		box, err := sandboxManager.Open(opt.sandboxName)
-		if err != nil {
-			return nil, err
-		}
-		return agent.NewSession(newSessionID(), opt.modelID, box), nil
-	}
-
+	// The bridge starts the tasks: /new is a Telegram command, and every task it
+	// starts opens this same named sandbox again, so a reset discards the
+	// conversation and keeps the files. Without -db the agent retains nothing, and
+	// the bridge offers no /sessions or /resume.
 	return telegram.Run(ctx, telegram.Config{
 		Token:        opt.token,
 		Agent:        a,
-		NewSession:   newSession,
+		Sandboxes:    sandboxManager,
+		SandboxName:  opt.sandboxName,
+		Model:        opt.modelID,
 		AllowedUsers: opt.allowed,
 		ShowThinking: opt.showThinking,
-		// Nil without -db: no stored history, and so no /sessions or /resume.
-		Sessions: a.Sessions(sandboxManager),
 	})
 }
 
@@ -239,15 +231,4 @@ func parseAllowedUsers(raw string) ([]int64, error) {
 		)
 	}
 	return ids, nil
-}
-
-// newSessionID returns an opaque local identifier. It deliberately encodes no
-// Telegram bot, chat, or user id.
-func newSessionID() string {
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		// A readable panic beats a predictable id.
-		panic("telegram-chat: reading random bytes: " + err.Error())
-	}
-	return "sess_" + hex.EncodeToString(b[:])
 }

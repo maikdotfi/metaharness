@@ -126,8 +126,9 @@ Resetting starts a new session, so messages, usage, status, and session id are
 reset together. It deliberately does not touch the sandbox: the sandbox is the
 workbench, the session is the task.
 
-`/sessions` and `/resume` arrive together with `-db` or not at all: they are one
-field on the bridge, so `/help` cannot offer a command that is not there.
+`/sessions` and `/resume` arrive together with `-db` or not at all: the bridge asks
+the agent what history it retains, so `/help` cannot offer a command that is not
+there.
 
 ## Persistence
 
@@ -136,10 +137,10 @@ transcript: restarting starts fresh.
 
 With `-db ./sessions.db` every turn is saved to a local Turso database — one row
 per session, one row per message — and `/resume` brings a session back. Storage
-keeps the *name* of the sandbox a session ran in and never a live handle, so
-`a.Sessions(sandboxManager)` is given somewhere to open that name again: resuming
-loads the transcript, opens the sandbox it recorded and binds the two, and the
-task continues in the filesystem it started in.
+keeps the *name* of the sandbox a session ran in and never a live handle, so the
+bridge resumes through the same manager it starts tasks with: resuming loads the
+transcript, opens the sandbox it recorded and binds the two, and the task
+continues in the filesystem it started in.
 
 The database is a SQLite-format file, so it can be read by hand:
 
