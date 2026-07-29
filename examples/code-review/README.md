@@ -10,17 +10,17 @@ flowchart LR
     CLI[examples/code-review] --> Agent[agent.Agent]
     Config[model.Config] --> Model[model.New]
     Model --> Agent
-    Store["agentdb/turso.Store\nsessions.db"] --> Agent
+    Store["agentdb/turso.Store<br/>sessions.db"] --> Agent
     OSTools["bash · read_file · edit_file · write_file"] --> Agent
     Skill["skill · grug-review"] --> Agent
 
-    Sandboxes["sandbox.Manager\nsandbox.LocalBackend"] --> Box["Open(\"checkout\")"]
+    Sandboxes["sandbox.Manager<br/>sandbox.LocalBackend"] --> Box["Open(&quot;checkout&quot;)"]
     Box --> Session[agent.Session]
     Session[agent.Session] --> Run[Agent.Run]
     Agent --> Run
     Run --> Events["assistant · tool_result · done · error"]
 
-    Run --> Local["sandbox \"checkout\"\nworkdir = checkout/"]
+    Run --> Local["sandbox &quot;checkout&quot;<br/>workdir = checkout/"]
     OSTools --> Local
     Local --> Checkout[checkout package]
 ```
@@ -98,11 +98,11 @@ sequenceDiagram
     participant Agent as agent.Run
     participant Model as FantasyModel / Anthropic
     participant Tool as selected tool
-    participant Box as sandbox.Manager
+    participant Sbx as sandbox.Manager
     participant Store as turso.Store
 
-    App->>Box: Open("checkout")
-    Box-->>App: sandbox handle
+    App->>Sbx: Open("checkout")
+    Sbx-->>App: sandbox handle
     App->>App: NewSession(id, model, handle)
     App->>Agent: Run(ctx, session)
 
@@ -113,8 +113,8 @@ sequenceDiagram
         opt Assistant requested tools
             Agent->>Tool: Execute(validated arguments, ExecCtx)
             opt Filesystem or shell tool
-                Tool->>Box: Exec(command)
-                Box-->>Tool: stdout, stderr, exit code
+                Tool->>Sbx: Exec(command)
+                Sbx-->>Tool: stdout, stderr, exit code
             end
             Tool-->>Agent: tool result
             Agent->>Agent: append result to transcript
@@ -125,7 +125,7 @@ sequenceDiagram
     Agent->>Agent: status = completed
     Agent->>Store: Save(session)
     Agent-->>App: EventDone
-    App->>Box: session.Close()
+    App->>Sbx: session.Close()
 ```
 
 A finished turn leaves the sandbox alone: the handle belongs to the session, and

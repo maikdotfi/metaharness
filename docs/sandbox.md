@@ -335,7 +335,7 @@ flowchart LR
     ENV["METAHARNESS_SANDBOX=work"] --> OPEN["Manager.Open(name)"]
     KIND["-sandbox docker<br/>-image golang:1.26"] --> MGR["sandbox.New(kind, opts…)"]
     MGR --> OPEN
-    OPEN --> H["a handle<br/><i>Name() == \"work\"</i>"]
+    OPEN --> H["a handle<br/><i>Name() == &quot;work&quot;</i>"]
     H --> NS["agent.NewSession(id, model, box)"]
     NS --> SESS["Session<br/><i>name + live handle</i>"]
     SESS --> RUN["Agent.Run(ctx, sess)"]
@@ -371,7 +371,7 @@ sequenceDiagram
     T->>H: ec.Sandbox.Exec(ctx, Command{"bash", "-c", cmd})
     Note over H,B: first command of the process only:<br/>ensureAdopted → backend.List → §7
     H->>E: ask(request{kind: reqExec}) — unbuffered send
-    Note over E: takes the request; nothing else runs<br/>for this sandbox until it replies
+    Note over E: takes the request — nothing else runs<br/>for this sandbox until it replies
     E->>B: EnsureReady(ctx, spec)
     B->>D: ContainerInspect / ImagePull / ContainerCreate / ContainerStart
     D-->>B: ok
@@ -381,7 +381,7 @@ sequenceDiagram
     D-->>B: stdout/stderr frames, then EOF
     B->>D: ContainerExecInspect → ExitCode
     B-->>E: ExecResult{out, err, code}, nil
-    E->>E: lastExec = now; state = Ready; armIdle
+    E->>E: lastExec = now, state = Ready, armIdle
     E-->>H: reply{res, err}
     H-->>T: ExecResult
     T-->>L: ToolResult{Content, IsError}
@@ -1294,7 +1294,7 @@ stateDiagram-v2
     Ready --> Destroying : Destroy
     Stopped --> Destroying : Destroy
     Destroying --> Destroyed : ok
-    Destroying --> Ready : failed (restore prior;<br/>re-arms idle only from Ready)
+    Destroying --> Ready : failed (restore prior,<br/>re-arms idle only from Ready)
     Destroyed --> [*] : goroutine exits, name forgotten
 
     note right of Ready
