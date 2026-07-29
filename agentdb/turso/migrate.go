@@ -13,21 +13,54 @@ type migration struct {
 	statements []string
 }
 
+// A session is two tables: one row in agent_sessions, and one row per message in
+// agent_messages. Every Save appends the messages that appeared since the last
+// one, so a turn's write cost is the turn rather than the whole transcript.
+//
+// sandbox holds the sandbox's name and nothing else. An image, a backend, a
+// daemon address are the writing process's configuration, and the process that
+// resumes the session is free to differ on all of them — the name is the only
+// part that still means the same thing.
+//
+// Usage is six columns rather than a JSON document so that List scans integers,
+// and so "how many tokens did this agent burn this month" is a SUM rather than a
+// program.
+//
+// There is deliberately no foreign key: Turso's PRAGMA support is partial and
+// SQLite needs foreign_keys=ON to enforce one anyway, so a REFERENCES clause here
+// would read like a guarantee it is not. A delete path, if one ever exists,
+// deletes messages explicitly in the same transaction.
 var migrations = []migration{
 	{
 		version: 1,
 		statements: []string{
 			`CREATE TABLE agent_sessions (
-				id            TEXT PRIMARY KEY,
-				model         TEXT NOT NULL,
-				status        TEXT NOT NULL,
-				message_count INTEGER NOT NULL DEFAULT 0,
-				session_json  TEXT NOT NULL,
-				created_at    TEXT NOT NULL,
-				updated_at    TEXT NOT NULL
+				id                    TEXT PRIMARY KEY,
+				model                 TEXT NOT NULL,
+				status                TEXT NOT NULL,
+				sandbox               TEXT NOT NULL DEFAULT '',
+				input_tokens          INTEGER NOT NULL DEFAULT 0,
+				output_tokens         INTEGER NOT NULL DEFAULT 0,
+				total_tokens          INTEGER NOT NULL DEFAULT 0,
+				reasoning_tokens      INTEGER NOT NULL DEFAULT 0,
+				cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+				cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+				created_at            TEXT NOT NULL,
+				updated_at            TEXT NOT NULL
 			)`,
 			`CREATE INDEX agent_sessions_updated_at
 				ON agent_sessions(updated_at DESC)`,
+			// seq is the message's index in the session's transcript, so the
+			// transcript's order is the database's order. The composite primary key
+			// is what makes a second writer fail loudly instead of interleaving.
+			`CREATE TABLE agent_messages (
+				session_id   TEXT NOT NULL,
+				seq          INTEGER NOT NULL,
+				role         TEXT NOT NULL,
+				content_json TEXT NOT NULL,
+				created_at   TEXT NOT NULL,
+				PRIMARY KEY (session_id, seq)
+			)`,
 		},
 	},
 }

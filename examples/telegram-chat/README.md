@@ -1,8 +1,9 @@
 # telegram-chat
 
 A personal Telegram bridge for one assembled Meta Harness agent. It uses
-Telegram long polling — no public HTTP listener — and keeps a single in-memory
-session you can reset with `/new`.
+Telegram long polling — no public HTTP listener — and talks to one session at a
+time, which `/new` resets. Pass `-db` to keep sessions in a local database and
+`/resume` a previous one.
 
 This is deliberately a personal, single-user setup: the agent has file and shell
 tools, so it is a privileged interface. Only the numeric Telegram user ids you
@@ -117,11 +118,38 @@ sandbox: unknown backend "podman": have docker, local (a backend is registered b
   the sandbox.
 - `/status` — show the session id, the sandbox it is bound to, the model, the
   message count, and token usage.
+- `/sessions` — list the stored sessions, most recent first. Only with `-db`.
+- `/resume <id>` — continue a stored session where it left off. Only with `-db`.
 - `/help`, `/start` — show help.
 
 Resetting starts a new session, so messages, usage, status, and session id are
 reset together. It deliberately does not touch the sandbox: the sandbox is the
 workbench, the session is the task.
+
+`/sessions` and `/resume` are offered only when the bridge was given a store, and
+`/help` lists them only then — a bridge that retains nothing does not advertise
+commands it cannot run.
+
+## Persistence
+
+Without `-db` the agent uses `agent.DiscardStore` and the live session is the only
+transcript: restarting starts fresh.
+
+With `-db ./sessions.db` every turn is saved to a local Turso database — one row
+per session, one row per message — and `/resume` brings a session back. A resumed
+session arrives with the *name* of the sandbox it ran in and no live handle; the
+bridge opens that name again and binds it, so the task continues in the filesystem
+it started in. Binding a different sandbox is refused rather than resumed.
+
+The database is a SQLite-format file, so it can be read by hand:
+
+```sh
+sqlite3 sessions.db 'SELECT id, status, sandbox, total_tokens FROM agent_sessions'
+sqlite3 sessions.db 'SELECT seq, role FROM agent_messages WHERE session_id = "sess_…" ORDER BY seq'
+```
+
+Linking the store is what brings the database driver in. Drop `-db` from your own
+assembly and the binary has no driver at all.
 
 ## Long polling vs. webhooks
 
@@ -132,7 +160,8 @@ this bot in webhook mode, that webhook is removed automatically.
 
 ## What this is not
 
-There is no persistence: restarting the process starts a fresh session by
-design. There are no groups, media, or webhooks, and no proactive
-notifications. See [`BRIDGE-PLAN.md`](../../BRIDGE-PLAN.md) for the intended
-scope and what is deliberately left for later.
+There are no groups, media, or webhooks, and no proactive notifications. One chat
+talks to one current session: there is no Telegram-chat-to-session mapping, and
+`/resume` switches which session that is rather than running two at once. See
+[`BRIDGE-PLAN.md`](../../BRIDGE-PLAN.md) for the intended scope and what is
+deliberately left for later.

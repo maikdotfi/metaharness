@@ -432,3 +432,176 @@ func TestContextCancellationStopsActiveRun(t *testing.T) {
 		t.Fatal("handleUpdate did not return after context cancellation")
 	}
 }
+
+// --- /sessions and /resume ---------------------------------------------------
+
+// newResumableTestBot wires a bridge whose sessions are retained, so /sessions
+// has something to list and /resume something to bring back. The resume function
+// is the one an application writes: load the session, then bind it to the sandbox
+// it recorded.
+func newResumableTestBot(t *testing.T, m model.ModelClient) (*personalBot, *fakeAPI) {
+	t.Helper()
+	store := &testutils.MemStore{}
+	a := agent.New("test system prompt",
+		agent.WithModel(m),
+		agent.WithStore(store),
+		agent.WithTools(agent.Adapt(tools.Bash{})),
+	)
+	var n int
+	factory := func() (*agent.Session, error) {
+		n++
+		box := &testutils.FakeSandbox{SandboxName: "work"}
+		return agent.NewSession(fmt.Sprintf("sess_%d", n), "test-model", box), nil
+	}
+	first, err := factory()
+	if err != nil {
+		t.Fatalf("session factory: %v", err)
+	}
+	api := &fakeAPI{}
+	pb := &personalBot{
+		agent:      a,
+		api:        api,
+		newSession: factory,
+		sessions:   store,
+		resume: func(ctx context.Context, id string) (*agent.Session, error) {
+			sess, err := store.Load(ctx, id)
+			if err != nil {
+				return nil, err
+			}
+			return sess, sess.Bind(&testutils.FakeSandbox{SandboxName: sess.SandboxName()})
+		},
+		allowed: map[int64]bool{allowedUser: true},
+		editGap: 0,
+		now:     time.Now,
+		current: first,
+	}
+	return pb, api
+}
+
+// lastSent is the text of the most recent reply, which for a command is the reply
+// to that command.
+func lastSent(t *testing.T, api *fakeAPI) string {
+	t.Helper()
+	texts := api.sentTexts()
+	if len(texts) == 0 {
+		t.Fatal("the bridge sent nothing")
+	}
+	return texts[len(texts)-1]
+}
+
+// TestResumeMakesAStoredSessionCurrent is the pair no store test can prove on its
+// own: a session comes back from storage, gets bound to the sandbox it recorded,
+// and the next message continues its transcript rather than starting a new one.
+func TestResumeMakesAStoredSessionCurrent(t *testing.T) {
+	m := &testutils.ScriptedModel{Replies: []fantasy.Message{
+		asstText("first"), asstText("second"), asstText("third"),
+	}}
+	pb, _ := newResumableTestBot(t, m)
+	ctx := context.Background()
+
+	pb.handleUpdate(ctx, privateText(allowedUser, 100, "remember this"))
+	firstID := pb.current.ID
+	stored := len(pb.current.Messages)
+	if stored == 0 {
+		t.Fatal("expected a transcript before starting a second session")
+	}
+
+	pb.handleUpdate(ctx, privateText(allowedUser, 100, "/new"))
+	if pb.current.ID == firstID {
+		t.Fatal("/new did not replace the session")
+	}
+
+	pb.handleUpdate(ctx, privateText(allowedUser, 100, "/resume "+firstID))
+
+	if pb.current.ID != firstID {
+		t.Fatalf("current session = %q, want the resumed %q", pb.current.ID, firstID)
+	}
+	if len(pb.current.Messages) != stored {
+		t.Errorf("resumed session has %d messages, want the %d it was saved with",
+			len(pb.current.Messages), stored)
+	}
+	if pb.current.Sandbox() == nil {
+		t.Fatal("the resumed session has no live sandbox, so it cannot run")
+	}
+
+	// And it really is runnable: the next prompt continues that transcript.
+	pb.handleUpdate(ctx, privateText(allowedUser, 100, "and now this"))
+	if len(pb.current.Messages) <= stored {
+		t.Errorf("a turn on the resumed session left %d messages, want more than %d",
+			len(pb.current.Messages), stored)
+	}
+}
+
+func TestResumeUnknownIDKeepsTheCurrentSession(t *testing.T) {
+	m := &testutils.ScriptedModel{} // a failed resume must not call the model
+	pb, api := newResumableTestBot(t, m)
+
+	before := pb.current
+	pb.handleUpdate(context.Background(), privateText(allowedUser, 100, "/resume nope"))
+
+	if pb.current != before {
+		t.Error("a failed resume replaced the working session")
+	}
+	if got := lastSent(t, api); !strings.Contains(got, "nope") {
+		t.Errorf("reply = %q, want it to name the session it could not resume", got)
+	}
+}
+
+func TestResumeWithoutAnIDExplainsItself(t *testing.T) {
+	pb, api := newResumableTestBot(t, &testutils.ScriptedModel{})
+
+	pb.handleUpdate(context.Background(), privateText(allowedUser, 100, "/resume"))
+
+	if got := lastSent(t, api); !strings.Contains(got, "/resume") {
+		t.Errorf("reply = %q, want usage naming the command", got)
+	}
+}
+
+func TestSessionsListsWhatCanBeResumed(t *testing.T) {
+	m := &testutils.ScriptedModel{Replies: []fantasy.Message{asstText("a")}}
+	pb, api := newResumableTestBot(t, m)
+	ctx := context.Background()
+
+	pb.handleUpdate(ctx, privateText(allowedUser, 100, "do work"))
+	current := pb.current.ID
+
+	pb.handleUpdate(ctx, privateText(allowedUser, 100, "/sessions"))
+
+	got := lastSent(t, api)
+	if !strings.Contains(got, current) {
+		t.Errorf("/sessions = %q, want it to list session %q", got, current)
+	}
+}
+
+// TestSessionsWithoutRetentionSaysSo keeps the storage-free bridge honest: the
+// commands exist on the type, but a bridge with nothing retained says it keeps no
+// history rather than reporting an unknown command or an empty list.
+func TestSessionsWithoutRetentionSaysSo(t *testing.T) {
+	pb, api := newTestBot(t, &testutils.ScriptedModel{}, false)
+
+	pb.handleUpdate(context.Background(), privateText(allowedUser, 100, "/sessions"))
+
+	got := lastSent(t, api)
+	if strings.Contains(got, "Unknown command") {
+		t.Errorf("/sessions = %q, want an explanation rather than an unknown command", got)
+	}
+	if !strings.Contains(strings.ToLower(got), "history") {
+		t.Errorf("/sessions = %q, want it to say no history is kept", got)
+	}
+}
+
+// TestHelpOnlyOffersCommandsThatWork keeps the help text from advertising a
+// capability the assembling application did not wire.
+func TestHelpOnlyOffersCommandsThatWork(t *testing.T) {
+	storageFree, freeAPI := newTestBot(t, &testutils.ScriptedModel{}, false)
+	storageFree.handleUpdate(context.Background(), privateText(allowedUser, 100, "/help"))
+	if got := lastSent(t, freeAPI); strings.Contains(got, "/resume") {
+		t.Errorf("help on a storage-free bridge = %q, want no /resume", got)
+	}
+
+	resumable, resumableAPI := newResumableTestBot(t, &testutils.ScriptedModel{})
+	resumable.handleUpdate(context.Background(), privateText(allowedUser, 100, "/help"))
+	if got := lastSent(t, resumableAPI); !strings.Contains(got, "/resume") {
+		t.Errorf("help on a resumable bridge = %q, want /resume offered", got)
+	}
+}

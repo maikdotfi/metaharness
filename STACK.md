@@ -12,13 +12,17 @@
   the Docker daemon SDK, used only by `sandbox/docker`. Nothing else imports it,
   and an application that sticks to the local sandbox never talks to a daemon.
 - [turso.tech/database/tursogo](https://pkg.go.dev/turso.tech/database/tursogo)
-  - optional embedded, CGO-free session database.
+  - optional embedded, CGO-free session database. It speaks the SQLite query
+  language and file format and reaches its Rust core through `purego`, so a
+  session database is readable with the `sqlite3` CLI and needs no toolchain.
+  Only `agentdb/turso` imports it.
 
 ## Layout
 
 ```
 agent/                    agent loop, sessions, store interface, tool plumbing
-agentdb/turso/            embedded Turso session store and schema migrations
+agentdb/turso/            embedded Turso agent database: sessions as rows, one
+                          row per message, and the schema migrations
 bridge/telegram/          personal Telegram long-polling bridge
 model/                    model client abstractions and fantasy adapter
 sandbox/                  sandbox lifecycle manager and the local backend
@@ -43,9 +47,11 @@ Meta Harness is not executable by itself. Applications import the library,
 choose a model, tools, sandbox, and session store, then assemble their own
 agent.
 
-Persistence is opt-in. `agent.JSONLStore` is the dependency-free filesystem
-backend; `agentdb/turso.Store` is the embedded database backend. Both implement
-the narrow `agent.SessionStore` and optional `agent.SessionLister` interfaces.
+Persistence is opt-in, and package `agent` holds no implementation of it beyond
+`DiscardStore`, the default. An application that wants sessions to survive a
+restart passes `agentdb/turso.Store` to `agent.WithStore`; one that does not
+links no database driver at all. A store implements the narrow
+`agent.SessionStore` and, to be listable, the optional `agent.SessionLister`.
 
 ## Logging
 

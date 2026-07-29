@@ -130,8 +130,9 @@ the sandbox keeps running until the manager's idle policy or a `Destroy` says
 otherwise.
 
 `DiscardStore.Save` succeeds without retaining checkpoints, so the live
-session is the only transcript. Applications can replace it with `JSONLStore`
-through `agent.WithStore` when persistence is wanted.
+session is the only transcript. Applications that want persistence pass
+`agentdb/turso.Store` through `agent.WithStore`; linking that store is what
+brings the database driver in, so a run like this one never touches it.
 
 ```text
 Session = ID + model ID + fantasy messages + token usage + status + its sandbox

@@ -148,10 +148,7 @@ func TestRunLeavesTheSessionsSandboxOpen(t *testing.T) {
 // name again is what makes it runnable.
 func TestRestoredSessionRunsInTheSandboxItRecorded(t *testing.T) {
 	ctx := context.Background()
-	store, err := agent.NewJSONLStore(t.TempDir())
-	if err != nil {
-		t.Fatalf("NewJSONLStore: %v", err)
-	}
+	store := &testutils.MemStore{}
 
 	a := execAgent("make")
 	saved := testutils.UserSession("s1", "fake-model", &testutils.FakeSandbox{SandboxName: "work"}, "Build it.")

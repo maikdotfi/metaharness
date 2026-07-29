@@ -38,12 +38,27 @@ const typingInterval = 4 * time.Second
 // that rather than starting a task with nowhere to work.
 type SessionFactory func() (*agent.Session, error)
 
+// SessionResumer returns the stored session with the given id, bound to the
+// sandbox it recorded and ready to run. It is the mirror of SessionFactory, and
+// it is the application's for the same reason: only the application knows where
+// sessions are stored and how to reach a sandbox by name.
+type SessionResumer func(ctx context.Context, id string) (*agent.Session, error)
+
 // Config configures the personal bridge.
 type Config struct {
 	Token        string
 	Agent        *agent.Agent
 	NewSession   SessionFactory
 	AllowedUsers []int64
+
+	// Sessions and Resume are what a bridge over a durable store can offer, and
+	// each is independently optional: listing sessions is useful without resuming
+	// them, and resuming a known id is useful without a list. Leave both unset —
+	// the storage-free default — and neither command is offered.
+	//
+	// A store that implements agent.SessionLister satisfies Sessions directly.
+	Sessions agent.SessionLister
+	Resume   SessionResumer
 
 	// ShowThinking includes the model's raw reasoning text in the progress
 	// status message. Progress itself is always reported and is not optional;
@@ -84,6 +99,8 @@ type personalBot struct {
 	agent        *agent.Agent
 	api          telegramAPI
 	newSession   SessionFactory
+	sessions     agent.SessionLister // nil when nothing is retained
+	resume       SessionResumer      // nil when nothing can be resumed
 	allowed      map[int64]bool
 	showThinking bool
 
@@ -115,6 +132,8 @@ func Run(ctx context.Context, cfg Config) error {
 	pb := &personalBot{
 		agent:        cfg.Agent,
 		newSession:   cfg.NewSession,
+		sessions:     cfg.Sessions,
+		resume:       cfg.Resume,
 		allowed:      allowed,
 		showThinking: cfg.ShowThinking,
 		editGap:      defaultEditGap,
@@ -181,37 +200,49 @@ func (b *personalBot) handleUpdate(ctx context.Context, update *models.Update) {
 
 	chatID := msg.Chat.ID
 	if strings.HasPrefix(msg.Text, "/") {
-		b.handleCommand(ctx, chatID, commandName(msg.Text))
+		cmd, arg := splitCommand(msg.Text)
+		b.handleCommand(ctx, chatID, cmd, arg)
 		return
 	}
 	b.handlePrompt(ctx, chatID, msg.Text)
 }
 
-// commandName extracts the bare command from message text, dropping any
-// "@botname" suffix and arguments: "/status@mybot extra" -> "/status".
-func commandName(text string) string {
-	fields := strings.Fields(text)
-	if len(fields) == 0 {
-		return ""
-	}
-	cmd := fields[0]
+// splitCommand separates the bare command from its argument, dropping any
+// "@botname" suffix: "/resume@mybot sess_7" -> "/resume", "sess_7".
+func splitCommand(text string) (cmd, arg string) {
+	cmd, arg, _ = strings.Cut(strings.TrimSpace(text), " ")
 	if at := strings.IndexByte(cmd, '@'); at >= 0 {
 		cmd = cmd[:at]
 	}
-	return cmd
+	return cmd, strings.TrimSpace(arg)
 }
 
-const helpText = `I run a Meta Harness agent. Just send a message to give it a task.
+// sessionListLimit is how many sessions /sessions offers. A personal chat window
+// is the constraint, not the store.
+const sessionListLimit = 10
 
-Commands:
-/new, /clear — discard the current context and start a fresh task
-/status — show the current session id, model, message count, and token usage
-/help, /start — show this help`
+// helpText describes only the commands this bridge can actually run: /sessions
+// and /resume exist just for an application that wired a store, and offering them
+// otherwise would be advertising a capability that is not there.
+func (b *personalBot) helpText() string {
+	var h strings.Builder
+	h.WriteString("I run a Meta Harness agent. Just send a message to give it a task.\n\nCommands:\n")
+	h.WriteString("/new, /clear — discard the current context and start a fresh task\n")
+	h.WriteString("/status — show the current session id, model, message count, and token usage\n")
+	if b.sessions != nil {
+		h.WriteString("/sessions — list the sessions that can be resumed\n")
+	}
+	if b.resume != nil {
+		h.WriteString("/resume <id> — continue a stored session where it left off\n")
+	}
+	h.WriteString("/help, /start — show this help")
+	return h.String()
+}
 
 // handleCommand runs a bridge command. Commands take the same turn lock, so one
 // received during a turn takes effect only after that turn completes, and they
 // are never appended to the agent transcript.
-func (b *personalBot) handleCommand(ctx context.Context, chatID int64, cmd string) {
+func (b *personalBot) handleCommand(ctx context.Context, chatID int64, cmd, arg string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -233,11 +264,79 @@ func (b *personalBot) handleCommand(ctx context.Context, chatID int64, cmd strin
 			"session %s\nsandbox %s\nmodel %s\nmessages %d\ntokens: %d in / %d out",
 			s.ID, s.SandboxName(), s.Model, len(s.Messages), s.Usage.InputTokens, s.Usage.OutputTokens,
 		))
+	case "/sessions":
+		b.listSessions(ctx, chatID)
+	case "/resume":
+		b.resumeSession(ctx, chatID, arg)
 	case "/help", "/start":
-		b.send(ctx, chatID, helpText)
+		b.send(ctx, chatID, b.helpText())
 	default:
-		b.send(ctx, chatID, "Unknown command.\n\n"+helpText)
+		b.send(ctx, chatID, "Unknown command.\n\n"+b.helpText())
 	}
+}
+
+// listSessions reports what can be resumed, most recent first, marking the one
+// this chat is talking to.
+func (b *personalBot) listSessions(ctx context.Context, chatID int64) {
+	if b.sessions == nil {
+		b.send(ctx, chatID, "This bridge keeps no session history.")
+		return
+	}
+	infos, err := b.sessions.List(ctx, sessionListLimit)
+	if err != nil {
+		b.send(ctx, chatID, "Sorry, I couldn't list the sessions: "+err.Error())
+		return
+	}
+	if len(infos) == 0 {
+		b.send(ctx, chatID, "No stored sessions yet.")
+		return
+	}
+
+	var out strings.Builder
+	out.WriteString("Sessions, most recent first:\n")
+	for _, info := range infos {
+		fmt.Fprintf(&out, "\n%s — %d messages, %d tokens in / %d out",
+			info.ID, info.Messages, info.Usage.InputTokens, info.Usage.OutputTokens)
+		if info.ID == b.current.ID {
+			out.WriteString(" (current)")
+		}
+	}
+	if b.resume != nil {
+		out.WriteString("\n\nSend /resume <id> to continue one.")
+	}
+	b.send(ctx, chatID, out.String())
+}
+
+// resumeSession makes a stored session the current one. A resume that fails
+// leaves the working session in place: the chat keeps something to talk to, which
+// is the same choice /new makes.
+func (b *personalBot) resumeSession(ctx context.Context, chatID int64, id string) {
+	if b.resume == nil {
+		b.send(ctx, chatID, "This bridge cannot resume sessions.")
+		return
+	}
+	if id == "" {
+		b.send(ctx, chatID, "Usage: /resume <session id>")
+		return
+	}
+	if id == b.current.ID {
+		b.send(ctx, chatID, "That session is already the current one.")
+		return
+	}
+
+	next, err := b.resume(ctx, id)
+	if err != nil {
+		if errors.Is(err, agent.ErrNotFound) {
+			b.send(ctx, chatID, fmt.Sprintf("I have no session called %q.", id))
+			return
+		}
+		b.send(ctx, chatID, fmt.Sprintf("Sorry, I couldn't resume %q: %s", id, err.Error()))
+		return
+	}
+	b.closeCurrent()
+	b.current = next
+	b.send(ctx, chatID, fmt.Sprintf("Resumed %s: %d messages, working in %s.",
+		next.ID, len(next.Messages), next.SandboxName()))
 }
 
 // closeCurrent releases the current session's handle on its sandbox. Call it

@@ -1,7 +1,7 @@
 // Command telegram-chat assembles one personal Meta Harness agent and exposes it
 // through a private Telegram chat. It talks to Telegram with long polling only —
-// there is no HTTP listener — and keeps a single in-memory session that you can
-// reset with /new.
+// there is no HTTP listener — and talks to one session at a time, which /new
+// resets.
 //
 // Run it from examples/telegram-chat with the environment set:
 //
@@ -9,11 +9,15 @@
 //	export TELEGRAM_BOT_TOKEN=123456:ABC...        # from @BotFather
 //	export TELEGRAM_ALLOWED_USERS=11111111         # your numeric Telegram id(s)
 //	export METAHARNESS_SANDBOX=work                # which sandbox to work in
-//	go run . -workdir ./workspace
+//	go run . -workdir ./workspace -db ./sessions.db
 //
 // METAHARNESS_SANDBOX names the sandbox to work in, creating it if it does not
 // exist yet. The same name is the same filesystem across turns, sessions and
 // restarts, and it survives until it is destroyed explicitly.
+//
+// -db is where persistence is chosen. With it, every turn is saved and /sessions
+// and /resume work; without it the agent keeps the default DiscardStore and the
+// live session is the only transcript.
 //
 // See README.md for BotFather setup and how to find your numeric user id.
 package main
@@ -33,6 +37,7 @@ import (
 	"syscall"
 
 	"github.com/maikdotfi/metaharness/agent"
+	"github.com/maikdotfi/metaharness/agentdb/turso"
 	"github.com/maikdotfi/metaharness/bridge/telegram"
 	"github.com/maikdotfi/metaharness/model"
 	"github.com/maikdotfi/metaharness/sandbox"
@@ -61,6 +66,7 @@ func main() {
 	sandboxKind := flag.String("sandbox", sandbox.LocalKind,
 		"where sandboxes live: "+strings.Join(sandbox.Backends(), ", "))
 	image := flag.String("image", "golang:1.26", "container image to work in; ignored by the local backend")
+	dbPath := flag.String("db", "", "session database file; empty keeps sessions in memory only")
 	flag.Parse()
 
 	if os.Getenv("ANTHROPIC_API_KEY") == "" {
@@ -86,6 +92,7 @@ func main() {
 		workdir:      *workdir,
 		sandboxName:  sandboxName(),
 		image:        *image,
+		dbPath:       *dbPath,
 		allowed:      allowed,
 		showThinking: *showThinking,
 		think:        *think,
@@ -104,10 +111,13 @@ type options struct {
 	// sandboxKind is where sandboxes live and workdir where the ones on the host
 	// filesystem go; sandboxName is the one every session works in, and image what
 	// to create it from if it does not exist yet.
-	sandboxKind  string
-	workdir      string
-	sandboxName  string
-	image        string
+	sandboxKind string
+	workdir     string
+	sandboxName string
+	image       string
+
+	// dbPath is where sessions are stored, or empty for no persistence at all.
+	dbPath       string
 	allowed      []int64
 	showThinking bool
 	think        bool
@@ -162,17 +172,30 @@ func run(ctx context.Context, opt options) error {
 	}
 	defer sandboxManager.Close()
 
-	// The agent holds no sandbox, which is why one can serve every session.
-	a := agent.New(systemPrompt,
+	// Persistence is a choice, and this is where it is made: with -db the agent
+	// saves every turn to a local Turso database and /resume can bring a session
+	// back, without it DiscardStore keeps everything in memory. Linking the store
+	// is what brings the database driver in, so the storage-free build has none.
+	agentOptions := []agent.Option{
 		agent.WithModel(m),
-		// DiscardStore is the default; the personal bridge is storage-free.
 		agent.WithTools(
 			agent.Adapt(tools.Bash{}),
 			agent.Adapt(tools.ReadFile{}),
 			agent.Adapt(tools.EditFile{}),
 			agent.Adapt(tools.WriteFile{}),
 		),
-	)
+	}
+	var store *turso.Store
+	if opt.dbPath != "" {
+		if store, err = turso.Open(ctx, opt.dbPath); err != nil {
+			return err
+		}
+		defer store.Close()
+		agentOptions = append(agentOptions, agent.WithStore(store))
+	}
+
+	// The agent holds no sandbox, which is why one can serve every session.
+	a := agent.New(systemPrompt, agentOptions...)
 
 	// Every task gets a new id and opens the same named sandbox again, so /new
 	// discards the conversation and keeps the files.
@@ -184,13 +207,31 @@ func run(ctx context.Context, opt options) error {
 		return agent.NewSession(newSessionID(), opt.modelID, box), nil
 	}
 
-	return telegram.Run(ctx, telegram.Config{
+	bridge := telegram.Config{
 		Token:        opt.token,
 		Agent:        a,
 		NewSession:   newSession,
 		AllowedUsers: opt.allowed,
 		ShowThinking: opt.showThinking,
-	})
+	}
+	if store != nil {
+		bridge.Sessions = store
+		// A stored session comes back with the name of the sandbox it ran in and
+		// no live handle. Opening that name is what puts the task back in the
+		// filesystem it started in; Bind refuses anything else.
+		bridge.Resume = func(ctx context.Context, id string) (*agent.Session, error) {
+			sess, err := store.Load(ctx, id)
+			if err != nil {
+				return nil, err
+			}
+			box, err := sandboxManager.Open(sess.SandboxName())
+			if err != nil {
+				return nil, err
+			}
+			return sess, sess.Bind(box)
+		}
+	}
+	return telegram.Run(ctx, bridge)
 }
 
 // parseAllowedUsers reads a comma-separated list of numeric Telegram user ids.
