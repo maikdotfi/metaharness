@@ -69,6 +69,21 @@ handle owns nothing.** The Docker SDK is imported by exactly one package
 (`sandbox/docker`), which is why you can build and test the agent loop on a
 machine with no daemon.
 
+### When none of that is wanted
+
+Everything above is machinery for *many* sandboxes over time. An application that
+works in one directory and never in another needs none of it:
+
+```go
+box, err := sandbox.Dir("workspace")
+sess := agent.NewSession(id, modelID, box)
+```
+
+No kind, no manager, no lifecycle: `Dir` creates the directory if it is not there
+yet and hands back a handle rooted in it, and the handle is the only thing to
+close. `examples/code-review` is exactly this shape. The rest of this document is
+what the other examples pay for, and what the paragraphs below are about.
+
 ### Choosing one: the import is the switch
 
 An application does not construct a backend by naming its type. It names a kind,
@@ -1382,10 +1397,10 @@ func init() {
 }
 ```
 
-`sandbox.Local` — the bare handle, `Dir` and nothing else — is still there beside
-it, for a test that wants a sandbox without a manager. It answers `Name()` with
-`filepath.Base(Dir)`, which is exactly the name `LocalBackend` would have given
-it, and `"local"` when it has no `Dir` at all.
+`sandbox.Dir` runs on the same handle type, which is why a session written by one
+is one the other can resume: the handle answers `Name()` with the directory's own
+name, so `Dir("/srv/work")` and the sandbox `work` under root `/srv` are the same
+sandbox by the only identity that is persisted.
 
 `dir()` is the security-relevant line, and it's the same posture as the Docker
 name regex:

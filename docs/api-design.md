@@ -235,16 +235,49 @@ holding everything needed to write it.
 
 ---
 
+### 9. The small case gets its own front door
+
+The manager is for many sandboxes over time. `examples/code-review` has one
+directory and one run, and paid for the general case in caller arithmetic:
+
+```go
+root, name := filepath.Split(filepath.Clean(workdir))   // before
+if root == "" {
+	root = "."
+}
+sandboxManager, err := sandbox.New(sandbox.LocalKind, sandbox.WithRoot(root))
+defer sandboxManager.Close()
+box, err := sandboxManager.Open(name)
+```
+
+```go
+box, err := sandbox.Dir(workdir)                        // after
+```
+
+The bare `sandbox.Local{Dir: …}` handle was already there, and was not the
+answer: it is move 3's smell — an exported struct whose zero value runs the
+agent's shell in whatever directory the process started from — and a second entry
+point that needed a paragraph in `docs/sandbox.md` reconciling it with
+`sandbox.New`. So `Dir` replaced it rather than joining it, and `Local` became
+unexported. The path is an argument because forgetting it must not compile.
+
+**Generally:** when the general-purpose entry point makes the smallest caller do
+arithmetic, the fix is a second entry point that returns the *same* type — not an
+option on the first one, and not a struct literal the caller fills in. `Dir` and
+`Manager.Open` both return `agent.Sandbox`, so which one an application uses
+changes one line and nothing downstream of it.
+
 ## Leaks still in the tree
 
 The rules above have teeth, which is easiest to show by pointing them at what is
 here now. Keep this list current: an entry earns its place by being a caller
 doing work the library should do.
 
-- **`examples/code-review/main.go:69`** does
-  `filepath.Split(filepath.Clean(workdir))` to turn one path into the
-  root-plus-name pair the manager wants. Arithmetic in a caller is a missing
-  entry point.
+- **`sandbox.LocalBackend` is still exported**, so `NewManager(LocalBackend{Root:
+  root})` — the assembly `New` exists to remove — remains spellable, and it is
+  the one backend an application can reach without importing anything it chose.
+  It is exported for no reason a caller has; the registry is how it should be
+  reached.
 - **Both examples wrap every built-in tool by hand** — `agent.Adapt(tools.Bash{})`
   and three more like it — and both assemble the identical `model.Config` from
   the identical environment variables. Repetition across every caller is the

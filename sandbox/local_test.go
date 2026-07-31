@@ -14,13 +14,88 @@ func bash(cmd string) agent.Command {
 	return agent.Command{Cmd: "bash", Args: []string{"-c", cmd}}
 }
 
+// mustDir is the whole assembly for a caller that wants one directory and no
+// manager, so the tests below go through exactly the call an application makes.
+func mustDir(t *testing.T, path string) agent.Sandbox {
+	t.Helper()
+	box, err := Dir(path)
+	if err != nil {
+		t.Fatalf("Dir(%q): %v", path, err)
+	}
+	t.Cleanup(func() { box.Close() })
+	return box
+}
+
+// TestDirIsTheWholeAssembly is the shape a single-sandbox application is meant
+// to have: one call turns a path into something a session can be given, with no
+// backend kind, no root-and-name pair and nothing to close but the handle.
+func TestDirIsTheWholeAssembly(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "work")
+	box := mustDir(t, dir)
+
+	sess := agent.NewSession("task-1", "some-model", box)
+	if sess.Sandbox() == nil {
+		t.Fatal("the session did not take the sandbox")
+	}
+	if sess.SandboxName() != "work" {
+		t.Errorf("SandboxName() = %q, want %q", sess.SandboxName(), "work")
+	}
+}
+
+// TestDirCreatesThePath checks a path that is not there yet is created, so the
+// promise is the same one Open makes: asking for a sandbox is enough to have it.
+func TestDirCreatesThePath(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "nested", "work")
+	box := mustDir(t, dir)
+
+	if _, err := box.Exec(context.Background(), bash("echo hi > out.txt")); err != nil {
+		t.Fatalf("unexpected infra error: %v", err)
+	}
+	if _, err := os.ReadFile(filepath.Join(dir, "out.txt")); err != nil {
+		t.Fatalf("expected the command to have run in a created %s: %v", dir, err)
+	}
+}
+
+// TestDirNameIsTheDirectoryName checks the name a session records is the
+// directory's own, whatever syntax the path was written in — it is what a
+// restored session would look its sandbox up by.
+func TestDirNameIsTheDirectoryName(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "work")
+	for _, path := range []string{dir, dir + "/.", dir + "/sub/.."} {
+		if got := mustDir(t, path).Name(); got != "work" {
+			t.Errorf("Dir(%q).Name() = %q, want %q", path, got, "work")
+		}
+	}
+}
+
+// TestDirRefusesNoPath checks the empty path is an error rather than the process
+// working directory: an agent with shell tools loose in someone's source tree is
+// not a default worth having.
+func TestDirRefusesNoPath(t *testing.T) {
+	if _, err := Dir(""); err == nil {
+		t.Fatal("expected an error for an empty path, got nil")
+	}
+}
+
+// TestDirRefusesAFile checks a path that exists as something other than a
+// directory fails at the call rather than at the first command.
+func TestDirRefusesAFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "file.txt")
+	if err := os.WriteFile(path, []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Dir(path); err == nil {
+		t.Fatal("expected an error for a path that is a file, got nil")
+	}
+}
+
 // TestLocalExecRunsInDir proves commands run with their working directory set
-// to Dir: a relative write lands inside Dir, not the process cwd. Checking the
-// file's location sidesteps the symlinked-temp-dir pitfall that comparing
-// `pwd` output would hit (e.g. /var vs /private/var on macOS).
+// to the sandbox's path: a relative write lands inside it, not in the process
+// cwd. Checking the file's location sidesteps the symlinked-temp-dir pitfall
+// that comparing `pwd` output would hit (e.g. /var vs /private/var on macOS).
 func TestLocalExecRunsInDir(t *testing.T) {
 	dir := t.TempDir()
-	box := &Local{Dir: dir}
+	box := mustDir(t, dir)
 
 	res, err := box.Exec(context.Background(), bash("echo hi > out.txt"))
 	if err != nil {
@@ -39,7 +114,7 @@ func TestLocalExecRunsInDir(t *testing.T) {
 }
 
 func TestLocalExecStdout(t *testing.T) {
-	box := &Local{Dir: t.TempDir()}
+	box := mustDir(t, t.TempDir())
 	res, err := box.Exec(context.Background(), bash("echo hello"))
 	if err != nil {
 		t.Fatalf("unexpected infra error: %v", err)
@@ -55,7 +130,7 @@ func TestLocalExecStdout(t *testing.T) {
 // TestLocalExecExitCode checks a non-zero exit is reported through ExitCode with
 // a nil error — the "command failed" case, not an infra failure.
 func TestLocalExecExitCode(t *testing.T) {
-	box := &Local{Dir: t.TempDir()}
+	box := mustDir(t, t.TempDir())
 	res, err := box.Exec(context.Background(), bash("exit 3"))
 	if err != nil {
 		t.Fatalf("non-zero exit should not be an infra error, got: %v", err)
@@ -67,7 +142,7 @@ func TestLocalExecExitCode(t *testing.T) {
 
 // TestLocalExecStderr checks stderr is captured even on failure.
 func TestLocalExecStderr(t *testing.T) {
-	box := &Local{Dir: t.TempDir()}
+	box := mustDir(t, t.TempDir())
 	res, err := box.Exec(context.Background(), bash("echo boom >&2; exit 1"))
 	if err != nil {
 		t.Fatalf("unexpected infra error: %v", err)
@@ -83,7 +158,7 @@ func TestLocalExecStderr(t *testing.T) {
 // TestLocalExecInfraError checks that a command that never runs (binary not
 // found) surfaces as a non-nil error, which the agent loop treats as fatal.
 func TestLocalExecInfraError(t *testing.T) {
-	box := &Local{Dir: t.TempDir()}
+	box := mustDir(t, t.TempDir())
 	_, err := box.Exec(context.Background(), agent.Command{Cmd: "definitely-not-a-real-binary-xyz"})
 	if err == nil {
 		t.Fatal("expected an infra error for a missing binary, got nil")

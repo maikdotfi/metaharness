@@ -8,6 +8,9 @@
 
 # Built binaries
 /bin/
+examples/code-review/code-review
+examples/telegram-chat/telegram-chat
+
 
 # Per-session local machine workspaces
 /workspaces/

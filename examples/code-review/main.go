@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/maikdotfi/metaharness/agent"
@@ -65,19 +64,13 @@ func run(ctx context.Context, modelName, workdir, prompt string, think bool, eff
 		return err
 	}
 
-	// A sandbox is addressed by name, and on the local backend a name is a
-	// directory under the root — so reviewing ./checkout is the sandbox "checkout"
-	// rooted at ".". The review is read-mostly and single-shot, but it goes
-	// through the manager like anything else.
-	root, name := filepath.Split(filepath.Clean(workdir))
-	if root == "" {
-		root = "."
-	}
-	sandboxManager, err := sandbox.New(sandbox.LocalKind, sandbox.WithRoot(root))
+	// This review works in one directory and never in another, so it takes that
+	// directory as its sandbox and no manager: nothing here has a second sandbox
+	// to name, open or keep warm.
+	box, err := sandbox.Dir(workdir)
 	if err != nil {
 		return err
 	}
-	defer sandboxManager.Close()
 
 	store, err := turso.Open(ctx, dbPath)
 	if err != nil {
@@ -98,11 +91,7 @@ func run(ctx context.Context, modelName, workdir, prompt string, think bool, eff
 	)
 
 	// The session is the binding of this task to that sandbox, and it owns the
-	// handle: closing it releases the reference, never the sandbox.
-	box, err := sandboxManager.Open(name)
-	if err != nil {
-		return err
-	}
+	// handle: closing it releases the reference, never the directory.
 	sess := agent.NewSession(fmt.Sprintf("review-%d", time.Now().Unix()), modelName, box)
 	defer sess.Close()
 	sess.Messages = append(sess.Messages, model.NewUserMessage(prompt))
