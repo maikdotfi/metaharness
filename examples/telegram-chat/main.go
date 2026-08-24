@@ -19,9 +19,9 @@
 // it. Nothing starts until a tool is called, so lightpanda is only needed if the
 // model reaches for the browser.
 //
-// -db is where persistence is chosen. With it, every turn is saved and /sessions
-// and /resume work; without it the agent keeps the default DiscardStore and the
-// live session is the only transcript.
+// -db is where persistence is chosen. With it, every turn is saved, /sessions and
+// /resume work, and the agent keeps notes across sessions; without it nothing
+// outlives the process and the live session is the only transcript.
 //
 // See README.md for BotFather setup and how to find your numeric user id.
 package main
@@ -43,6 +43,7 @@ import (
 	"github.com/maikdotfi/metaharness/bridge/telegram"
 	"github.com/maikdotfi/metaharness/mcp"
 	"github.com/maikdotfi/metaharness/mcp/lightpanda"
+	"github.com/maikdotfi/metaharness/memory"
 	"github.com/maikdotfi/metaharness/model"
 	"github.com/maikdotfi/metaharness/sandbox"
 	"github.com/maikdotfi/metaharness/tools"
@@ -183,9 +184,10 @@ func run(ctx context.Context, opt options) error {
 	defer browser.Close()
 
 	// Persistence is a choice, and this is where it is made: with -db the agent
-	// saves every turn to a local Turso database and /resume can bring a session
-	// back, without it DiscardStore keeps everything in memory. Linking the store
-	// is what brings the database driver in, so the storage-free build has none.
+	// saves every turn to a local Turso database, /resume brings a session back, and
+	// what it remembers outlives the session that wrote it. Without it nothing is
+	// kept. Linking the store is what brings the database driver in, so the
+	// storage-free build has none.
 	agentOptions := []agent.Option{
 		agent.WithModel(m),
 		agent.WithTools(
@@ -202,7 +204,10 @@ func run(ctx context.Context, opt options) error {
 			return err
 		}
 		defer store.Close()
-		agentOptions = append(agentOptions, agent.WithStore(store))
+		agentOptions = append(agentOptions,
+			agent.WithStore(store),
+			agent.WithMemory(memory.SystemPrompt(store)),
+		)
 	}
 
 	// The agent holds no sandbox, which is why one can serve every session.

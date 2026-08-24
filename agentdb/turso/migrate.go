@@ -63,6 +63,20 @@ var migrations = []migration{
 			)`,
 		},
 	},
+	{
+		// What the agent knows between sessions: one row per topic, and no agent
+		// id. This is a personal agent and the database is its; a second agent
+		// gets a second file, the way a second sandbox gets a second name.
+		version: 2,
+		statements: []string{
+			`CREATE TABLE agent_notes (
+				topic      TEXT PRIMARY KEY,
+				content    TEXT NOT NULL,
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL
+			)`,
+		},
+	},
 }
 
 // Migrate applies all pending schema migrations in version order.

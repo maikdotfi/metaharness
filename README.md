@@ -1,6 +1,6 @@
 # Meta Harness
 
-Meta Harness allows building Agent Harnesses from pieces. It helps to run primarily async agents that are harnessed with a specific model, tools, skills and a sandbox environment.
+Meta Harness allows building Agent Harnesses from pieces. It helps to run primarily async agents that are harnessed with a specific model, tools, skills, a sandbox environment and notes they keep between sessions.
 
 It is not meant to be useful without some coding, you have to write the agent itself in the end and deploy. That is part of the fun.
 

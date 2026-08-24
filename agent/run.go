@@ -42,6 +42,11 @@ func (a *Agent) Run(ctx context.Context, sess *Session) (<-chan Event, error) {
 		return nil, errors.New("session has no sandbox")
 	}
 
+	system, err := a.systemPrompt(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	out := make(chan Event, 8)
 	go func() {
 		defer close(out)
@@ -77,7 +82,7 @@ func (a *Agent) Run(ctx context.Context, sess *Session) (<-chan Event, error) {
 			default: // empty, or last was user/tool -> call the model
 				msg, usage, err := a.Model.Generate(ctx, model.ModelRequest{
 					Model:    sess.Model,
-					System:   a.SystemPrompt,
+					System:   system,
 					Messages: sess.Messages,
 					Tools:    a.toolDefs(),
 				})

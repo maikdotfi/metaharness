@@ -11,6 +11,7 @@ type Agent struct {
 	Tools        map[string]Tool
 	Model        model.ModelClient
 	Store        SessionStore
+	Memory       Memory
 }
 
 type Option func(*Agent)

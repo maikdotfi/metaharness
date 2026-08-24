@@ -26,7 +26,8 @@
 ```
 agent/                    agent loop, sessions, store interface, tool plumbing
 agentdb/turso/            embedded Turso agent database: sessions as rows, one
-                          row per message, and the schema migrations
+                          row per message, the agent's notes, and the schema
+                          migrations
 bridge/telegram/          personal Telegram long-polling bridge
 model/                    model client abstractions and fantasy adapter
 sandbox/                  sandbox lifecycle manager and the local backend
@@ -34,6 +35,8 @@ sandbox/docker/           Docker backend: one long-lived container per sandbox
 mcp/                      MCP servers as sources of agent.Tool: reflect a whole
                           server, or declare a curated subset
 mcp/lightpanda/           declared browser tools over `lightpanda mcp`
+memory/                   what an agent knows between sessions, rendered into
+                          its system prompt
 tools/                    built-in tools
 skills/                   bundled skill prompts
 testutils/                reusable fakes and backend behavior suites
@@ -61,6 +64,10 @@ Persistence is opt-in, and package `agent` holds no implementation of it beyond
 restart passes `agentdb/turso.Store` to `agent.WithStore`; one that does not
 links no database driver at all. A store implements the narrow
 `agent.SessionStore` and, to be listable, the optional `agent.SessionLister`.
+
+Memory is that choice made again for what outlives a session:
+`agent.WithMemory(memory.SystemPrompt(store))` renders the agent's notes into its
+system prompt and gives the model one tool to write them.
 
 ## Logging
 

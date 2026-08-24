@@ -282,12 +282,13 @@ doing work the library should do.
   and three more like it — and both assemble the identical `model.Config` from
   the identical environment variables. Repetition across every caller is the
   library's job, not theirs.
-- **`examples/telegram-chat/main.go:177`** builds a `[]agent.Option` and appends
-  to it because one option depends on a flag. Whether to persist is the
-  application's choice; the slice is not — it is there because there is no way to
-  say "no store" as a *value*, and `WithStore` given a nil `*turso.Store` would
-  leave the agent holding a non-nil interface over a nil pointer, which is worse
-  than the append. The trap is the finding, not the two lines.
+- **`examples/telegram-chat/main.go`** builds a `[]agent.Option` and appends to it
+  because two options depend on a flag. Whether to persist is the application's
+  choice; the slice is not — it is there because there is no way to say "no store"
+  as a *value*, and `WithStore` given a nil `*turso.Store` would leave the agent
+  holding a non-nil interface over a nil pointer, which is worse than the append.
+  `WithMemory(memory.SystemPrompt(store))` has the same trap for the same reason.
+  The trap is the finding, not the two lines.
 - **`mcp.WithBearer` and `mcp.WithHTTPClient` on a stdio server do nothing.** The
   same price as `sandbox.WithImage` below, paid for the same reason: one option
   vocabulary serving both transports. It is smaller here — two options out of

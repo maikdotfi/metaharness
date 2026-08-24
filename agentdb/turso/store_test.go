@@ -64,17 +64,32 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := turso.Migrate(context.Background(), db); err != nil {
 		t.Fatalf("first Migrate() error = %v", err)
 	}
+	applied := appliedMigrations(t, db)
+
 	if err := turso.Migrate(context.Background(), db); err != nil {
 		t.Fatalf("second Migrate() error = %v", err)
 	}
+	if got := appliedMigrations(t, db); got != applied {
+		t.Fatalf("migration rows = %d after a second Migrate, want %d", got, applied)
+	}
 
+	// And the schema the second Migrate left alone is still one usable schema.
+	store := turso.New(db)
+	if err := store.Append(context.Background(), "taste", "Deep dives."); err != nil {
+		t.Fatalf("Append() after a second Migrate error = %v", err)
+	}
+}
+
+func appliedMigrations(t *testing.T, db *sql.DB) int {
+	t.Helper()
 	var count int
 	if err := db.QueryRow("SELECT COUNT(*) FROM agent_schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("migration rows = %d, want 1", count)
+	if count == 0 {
+		t.Fatal("no migrations applied")
 	}
+	return count
 }
 
 func TestNewDoesNotOwnDatabase(t *testing.T) {
