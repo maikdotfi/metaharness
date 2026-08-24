@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"reflect"
@@ -69,6 +70,14 @@ func (a *typedAdapter[T]) Execute(
 	ec *ExecCtx,
 	input json.RawMessage,
 ) (ToolResult, error) {
+	// A tool that asks for nothing gets called with nothing: models variously
+	// send `{}`, an empty string, or a literal JSON null, and all three mean the same
+	// thing. Reading them as the empty object keeps the schema the only judge of
+	// what a tool needs.
+	if trimmed := bytes.TrimSpace(input); len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		input = []byte("{}")
+	}
+
 	// Validate against the schema first so missing required fields, bad enums,
 	// and out-of-range numbers become a clear message fed back to the model
 	// rather than silent Go zero values.
