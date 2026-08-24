@@ -398,6 +398,25 @@ and a typed tool isn't one until it's adapted), so it's hard to get wrong.
 decode, real shell execution) and checks that `{}` is rejected before anything
 runs.
 
+`WithTools` is additive, so tools from different places — built-ins here, an MCP
+server's there — can be passed in separate calls. Two tools with one name is a
+panic: the model would be told about one and reach the other.
+
+### The case for the erased interface
+
+Everything above authors tools from a Go type, which is why `Tool` is almost
+always something `Adapt` produced. `package mcp` is the exception, and the reason
+`Tool` is exported at all: an MCP server publishes its own JSON Schema at
+runtime, so there is no `T` to derive one from and nothing to validate against
+locally. `mcp/tools.go` implements the erased interface directly — schema
+verbatim from the server, arguments passed through untouched — and the server
+answers a bad call itself.
+
+The other door in that package is the ordinary one: `mcp/lightpanda` hand-writes
+four tools with `AdaptFunc` over typed argument structs, and the compiler checks
+them like any other tool. Both produce `[]agent.Tool`, and the dispatcher cannot
+tell them apart. That is the erasure earning its keep.
+
 ## Trade-offs
 
 What we gained:

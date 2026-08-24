@@ -15,6 +15,10 @@
 // exist yet. The same name is the same filesystem across turns, sessions and
 // restarts, and it survives until it is destroyed explicitly.
 //
+// The agent also gets browser tools, from a `lightpanda mcp` server run beside
+// it. Nothing starts until a tool is called, so lightpanda is only needed if the
+// model reaches for the browser.
+//
 // -db is where persistence is chosen. With it, every turn is saved and /sessions
 // and /resume work; without it the agent keeps the default DiscardStore and the
 // live session is the only transcript.
@@ -37,6 +41,8 @@ import (
 	"github.com/maikdotfi/metaharness/agent"
 	"github.com/maikdotfi/metaharness/agentdb/turso"
 	"github.com/maikdotfi/metaharness/bridge/telegram"
+	"github.com/maikdotfi/metaharness/mcp"
+	"github.com/maikdotfi/metaharness/mcp/lightpanda"
 	"github.com/maikdotfi/metaharness/model"
 	"github.com/maikdotfi/metaharness/sandbox"
 	"github.com/maikdotfi/metaharness/tools"
@@ -48,7 +54,7 @@ import (
 
 const systemPrompt = `You are a helpful personal assistant reachable over Telegram.
 
-You have file and shell tools scoped to a working directory. Use them to inspect and change files and to run commands when a task calls for it. Keep replies concise and suitable for a chat window; when you show output, show only the relevant part.`
+You have file and shell tools scoped to a working directory. Use them to inspect and change files and to run commands when a task calls for it. You also have browser tools: load a page with browser_goto, then read it with browser_markdown or browser_links. Keep replies concise and suitable for a chat window; when you show output, show only the relevant part.`
 
 // defaultSandboxName is where work goes when METAHARNESS_SANDBOX says nothing:
 // every sandbox has a name, and a stable default beats a throwaway one.
@@ -170,6 +176,12 @@ func run(ctx context.Context, opt options) error {
 	}
 	defer sandboxManager.Close()
 
+	// A browser, from a server that is a value: nothing is dialed here, so this
+	// costs nothing until a tool is called and needs lightpanda on PATH only then.
+	// Missing it is a tool error the model reads and stops asking for.
+	browser := mcp.Stdio("lightpanda", []string{"mcp"})
+	defer browser.Close()
+
 	// Persistence is a choice, and this is where it is made: with -db the agent
 	// saves every turn to a local Turso database and /resume can bring a session
 	// back, without it DiscardStore keeps everything in memory. Linking the store
@@ -182,6 +194,7 @@ func run(ctx context.Context, opt options) error {
 			agent.Adapt(tools.EditFile{}),
 			agent.Adapt(tools.WriteFile{}),
 		),
+		agent.WithTools(lightpanda.Tools(browser)...),
 	}
 	if opt.dbPath != "" {
 		store, err := turso.Open(ctx, opt.dbPath)

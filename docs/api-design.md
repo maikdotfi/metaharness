@@ -288,6 +288,12 @@ doing work the library should do.
   say "no store" as a *value*, and `WithStore` given a nil `*turso.Store` would
   leave the agent holding a non-nil interface over a nil pointer, which is worse
   than the append. The trap is the finding, not the two lines.
+- **`mcp.WithBearer` and `mcp.WithHTTPClient` on a stdio server do nothing.** The
+  same price as `sandbox.WithImage` below, paid for the same reason: one option
+  vocabulary serving both transports. It is smaller here — two options out of
+  four, and the transport is chosen by which constructor was called rather than
+  by a string — but a caller reading the option list still cannot tell which half
+  applies to them.
 - **`sandbox.WithImage` on a local manager does nothing.** One option vocabulary
   serving every backend is the acknowledged price of choosing a backend by name
   (`sandbox/registry.go:17`), but it is a price, and a caller reading the flag

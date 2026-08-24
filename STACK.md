@@ -11,6 +11,10 @@
 - [github.com/docker/docker/client](https://pkg.go.dev/github.com/docker/docker/client) -
   the Docker daemon SDK, used only by `sandbox/docker`. Nothing else imports it,
   and an application that sticks to the local sandbox never talks to a daemon.
+- [github.com/modelcontextprotocol/go-sdk](https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk/mcp) -
+  the official MCP client, used only by `mcp/`. Being its client is what lets us
+  branch on no protocol version: it negotiates `2024-11-05` through `2026-07-28`
+  by itself. Nothing outside `mcp/` imports it, and no application names it.
 - [turso.tech/database/tursogo](https://pkg.go.dev/turso.tech/database/tursogo)
   - optional embedded, CGO-free session database. It speaks the SQLite query
   language and file format and reaches its Rust core through `purego`, so a
@@ -27,6 +31,9 @@ bridge/telegram/          personal Telegram long-polling bridge
 model/                    model client abstractions and fantasy adapter
 sandbox/                  sandbox lifecycle manager and the local backend
 sandbox/docker/           Docker backend: one long-lived container per sandbox
+mcp/                      MCP servers as sources of agent.Tool: reflect a whole
+                          server, or declare a curated subset
+mcp/lightpanda/           declared browser tools over `lightpanda mcp`
 tools/                    built-in tools
 skills/                   bundled skill prompts
 testutils/                reusable fakes and backend behavior suites
@@ -41,7 +48,9 @@ make test
 ```
 
 `make test-docker` additionally runs the sandbox suite against a real Docker
-daemon; it needs one running and is otherwise skipped.
+daemon; it needs one running and is otherwise skipped. `make test-lightpanda`
+runs the MCP suite against a real `lightpanda mcp` subprocess, which is where the
+legacy protocol lifecycle is proven.
 
 Meta Harness is not executable by itself. Applications import the library,
 choose a model, tools, sandbox, and session store, then assemble their own
@@ -62,8 +71,9 @@ starts and finishes.
 
 `debug` shows the raw mechanics of an agent run: the system and user prompts,
 every tool call with the exact input the model produced and the exact content
-returned (bash, Skill and MCP tools alike), skill loads, raw MCP JSON-RPC
-frames, and every step message as serialized JSON.
+returned, skill loads, and every step message as serialized JSON. What an MCP
+server did is not in there — `mcp.WithObserver` reports that to the application,
+which decides whether it is a log line.
 
 ```sh
 METAHARNESS_LOG_LEVEL=debug metaharness agent --agent code-review \

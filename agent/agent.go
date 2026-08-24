@@ -18,11 +18,24 @@ type Option func(*Agent)
 func WithModel(m model.ModelClient) Option { return func(a *Agent) { a.Model = m } }
 func WithStore(s SessionStore) Option      { return func(a *Agent) { a.Store = s } }
 
+// WithTools adds tools to the agent. It is additive, so tools that come from
+// different places — built-ins here, an MCP server's there — can be passed
+// separately without one call discarding another's.
+//
+// Two tools with the same name is a panic, the way a duplicate sandbox backend
+// is: the model would be told about one and reach the other, and that is a
+// mistake in the wiring rather than a condition to recover from.
 func WithTools(ts ...Tool) Option {
 	return func(a *Agent) {
-		a.Tools = make(map[string]Tool, len(ts))
+		if a.Tools == nil {
+			a.Tools = make(map[string]Tool, len(ts))
+		}
 		for _, t := range ts {
-			a.Tools[t.Definition().Name] = t
+			name := t.Definition().Name
+			if _, taken := a.Tools[name]; taken {
+				panic("agent: tool " + name + " is registered twice")
+			}
+			a.Tools[name] = t
 		}
 	}
 }
