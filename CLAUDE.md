@@ -3,6 +3,8 @@
 - strict TDD: write the failing test first
 - tests must test the behaviour, not the implementation
 - stay true to idiomatic Go
+- comments are allowed, but they must be short 1-2 sentences in most cases
+  - use godoc style for comments, especially larger ones when required for an entire package
 
 ## Public API
 
