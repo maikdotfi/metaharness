@@ -32,6 +32,12 @@ import (
 
 const defaultCorrectionGap = 700 * time.Millisecond
 
+// maxOfflineAge is how stale a message the server queued while the bridge was
+// offline may be and still be answered. One digest interval: an agent that
+// speaks first is owed the reply typed while it was restarting, and nothing
+// older is still the conversation.
+const maxOfflineAge = 12 * time.Hour
+
 // Config configures the personal XMPP bridge.
 type Config struct {
 	// Username is the full JID of the account the bridge logs in as, for example
@@ -57,9 +63,15 @@ type Config struct {
 	// ShowThinking includes raw model reasoning in progress messages. Progress is
 	// always reported; false replaces reasoning text with a bare "thinking…" step.
 	ShowThinking bool
+
+	// Schedule is a prompt the bridge starts on its own, at fixed times of day.
+	// The zero value schedules nothing, and every turn begins with a message.
+	Schedule Schedule
 }
 
-func (c Config) validate() (jid.JID, map[string]bool, error) {
+// validate reports the configuration's problems and returns the account to log
+// in as together with the people allowed to use it, by bare JID.
+func (c Config) validate() (jid.JID, []jid.JID, error) {
 	username := strings.TrimSpace(c.Username)
 	if username == "" {
 		return jid.JID{}, nil, errors.New("xmpp: empty Username")
@@ -90,7 +102,12 @@ func (c Config) validate() (jid.JID, map[string]bool, error) {
 		return jid.JID{}, nil, errors.New("xmpp: at least one allowed JID required")
 	}
 
-	allowed := make(map[string]bool, len(c.AllowedJIDs))
+	if err := c.Schedule.validate(); err != nil {
+		return jid.JID{}, nil, err
+	}
+
+	var allowed []jid.JID
+	seen := make(map[string]bool, len(c.AllowedJIDs))
 	for _, raw := range c.AllowedJIDs {
 		raw = strings.TrimSpace(raw)
 		j, err := jid.Parse(raw)
@@ -100,7 +117,10 @@ func (c Config) validate() (jid.JID, map[string]bool, error) {
 			}
 			return jid.JID{}, nil, fmt.Errorf("xmpp: invalid allowed JID %q: %w", raw, err)
 		}
-		allowed[j.Bare().String()] = true
+		if bare := j.Bare(); !seen[bare.String()] {
+			seen[bare.String()] = true
+			allowed = append(allowed, bare)
+		}
 	}
 	return account, allowed, nil
 }
@@ -156,8 +176,14 @@ type personalBridge struct {
 	allowed      map[string]bool
 	showThinking bool
 
+	// schedule is the prompt the bridge starts on its own, and allowedJIDs the
+	// bare JIDs it sends the answer to, having no incoming stanza to reply to.
+	schedule    Schedule
+	allowedJIDs []jid.JID
+
 	correctionGap time.Duration
 	now           func() time.Time
+	after         func(time.Duration) <-chan time.Time
 
 	mu      sync.Mutex
 	current *agent.Session
@@ -175,10 +201,16 @@ func newBridge(cfg Config) (*personalBridge, error) {
 		sandboxName:   cfg.SandboxName,
 		modelID:       cfg.Model,
 		sessions:      cfg.Agent.Sessions(cfg.Sandboxes),
-		allowed:       allowed,
+		allowed:       make(map[string]bool, len(allowed)),
+		allowedJIDs:   allowed,
 		showThinking:  cfg.ShowThinking,
+		schedule:      cfg.Schedule,
 		correctionGap: defaultCorrectionGap,
 		now:           time.Now,
+		after:         time.After,
+	}
+	for _, j := range allowed {
+		b.allowed[j.String()] = true
 	}
 	first, err := b.startSession()
 	if err != nil {
@@ -251,14 +283,28 @@ func Run(ctx context.Context, cfg Config) error {
 	incoming := newMessageQueue()
 	serveDone := make(chan error, 1)
 	go func() {
-		serveDone <- s.Serve(incomingHandler(ctx, incoming))
+		serveDone <- s.Serve(incomingHandler(ctx, incoming, b.now))
 	}()
 
 	slog.Info("xmpp bridge started",
 		"jid", s.LocalAddr().String(), "session", b.current.ID,
 		"sandbox", b.sandboxName, "allowed_jids", len(b.allowed))
 
+	return b.serve(ctx, incoming, serveDone)
+}
+
+// serve runs one turn at a time until the stream ends or ctx is cancelled. A
+// scheduled slot is a fourth case rather than a goroutine, so a slot that comes
+// due during a turn is served when that turn ends.
+func (b *personalBridge) serve(ctx context.Context, incoming *messageQueue, serveDone <-chan error) error {
 	for {
+		var due <-chan time.Time
+		if !b.schedule.zero() {
+			now := b.now()
+			if next := nextDue(now, b.schedule.at); !next.IsZero() {
+				due = b.after(next.Sub(now))
+			}
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -274,6 +320,8 @@ func Run(ctx context.Context, cfg Config) error {
 			if msg, ok := incoming.pop(); ok {
 				b.handleMessage(ctx, msg)
 			}
+		case <-due:
+			b.runScheduled(ctx)
 		}
 	}
 }
@@ -320,9 +368,9 @@ func (q *messageQueue) pop() (messageBody, bool) {
 	return msg, true
 }
 
-func incomingHandler(ctx context.Context, incoming *messageQueue) mxmpp.Handler {
+func incomingHandler(ctx context.Context, incoming *messageQueue, now func() time.Time) mxmpp.Handler {
 	return mxmpp.HandlerFunc(func(t xmlstream.TokenReadEncoder, start *xml.StartElement) error {
-		msg, ok, err := decodeMessage(t, start)
+		msg, ok, err := decodeMessage(t, start, now())
 		if err != nil || !ok {
 			return err
 		}
@@ -336,7 +384,7 @@ func incomingHandler(ctx context.Context, incoming *messageQueue) mxmpp.Handler 
 	})
 }
 
-func decodeMessage(r xml.TokenReader, start *xml.StartElement) (messageBody, bool, error) {
+func decodeMessage(r xml.TokenReader, start *xml.StartElement, now time.Time) (messageBody, bool, error) {
 	if start.Name.Local != "message" ||
 		(start.Name.Space != "" && start.Name.Space != stanza.NSClient) {
 		return messageBody{}, false, nil
@@ -348,9 +396,15 @@ func decodeMessage(r xml.TokenReader, start *xml.StartElement) (messageBody, boo
 	}
 	// A correction is the XMPP equivalent of an edited update. The original may
 	// already be running, so treating the correction as another prompt could
-	// repeat tool side effects. Delayed messages were queued while the bridge was
-	// offline; ignoring them matches the Telegram bridge's stale-update policy.
-	if msg.Type != stanza.ChatMessage || msg.Body == "" || msg.Replace != nil || msg.Delay != nil {
+	// repeat tool side effects.
+	if msg.Type != stanza.ChatMessage || msg.Body == "" || msg.Replace != nil {
+		return messageBody{}, false, nil
+	}
+	// A delayed message was queued while the bridge was offline. A recent one is
+	// the answer to something the agent said unprompted, and worth having.
+	if msg.Delay != nil && now.Sub(msg.Delay.Stamp) > maxOfflineAge {
+		slog.Info("xmpp stale offline message ignored",
+			"from", msg.From.String(), "stamp", msg.Delay.Stamp)
 		return messageBody{}, false, nil
 	}
 	return msg, true, nil
@@ -387,6 +441,10 @@ func (b *personalBridge) helpText() string {
 		h.WriteString("/resume <id> — continue a stored session where it left off\n")
 	}
 	h.WriteString("/help, /start — show this help")
+	if !b.schedule.zero() {
+		fmt.Fprintf(&h, "\n\nI also start a turn on my own at %s, and send what comes of it here.",
+			strings.Join(b.schedule.at, " and "))
+	}
 	return h.String()
 }
 
@@ -490,19 +548,44 @@ func (b *personalBridge) closeCurrent() {
 func (b *personalBridge) handlePrompt(ctx context.Context, to jid.JID, text string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.runTurn(ctx, text, []jid.JID{to}, b.newStatus(to))
+}
 
+// runScheduled starts a turn nobody asked for. It replaces the current session
+// unless the schedule continues it, and says nothing about having done so: the
+// digest is the announcement, and /status shows the new id.
+func (b *personalBridge) runScheduled(ctx context.Context) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if !b.schedule.continuing {
+		next, err := b.startSession()
+		if err != nil {
+			slog.Error("scheduled run could not start a fresh session", "err", err)
+			return
+		}
+		b.closeCurrent()
+		b.current = next
+	}
+	slog.Info("scheduled turn starting", "session", b.current.ID)
+	b.runTurn(ctx, b.schedule.prompt, b.allowedJIDs, nil)
+}
+
+// runTurn runs one prompt and sends its answer to every recipient. A nil status
+// is a scheduled turn: no progress trail, and no word when there is nothing to
+// say. It expects b.mu held.
+func (b *personalBridge) runTurn(ctx context.Context, text string, to []jid.JID, status *statusMessage) {
 	sess := b.current
 	sess.Messages = append(sess.Messages, model.NewUserMessage(text))
 	sess.Status = agent.StatusActive
 
-	status := b.newStatus(to)
 	status.start(ctx)
 
 	events, err := b.agent.Run(ctx, sess)
 	if err != nil {
 		status.append(ctx, "❌ "+clip(oneLine(err.Error()), 120))
 		status.flush(ctx, true)
-		b.send(ctx, to, "Sorry, I couldn't start that turn: "+err.Error())
+		b.sendAll(ctx, to, "Sorry, I couldn't start that turn: "+err.Error())
 		return
 	}
 
@@ -522,19 +605,27 @@ func (b *personalBridge) handlePrompt(ctx context.Context, to jid.JID, text stri
 	status.flush(ctx, true)
 
 	if runErr != nil {
-		b.send(ctx, to, "Sorry, that turn failed: "+runErr.Error())
+		b.sendAll(ctx, to, "Sorry, that turn failed: "+runErr.Error())
 		return
 	}
 	if final == "" {
-		b.send(ctx, to, "(the agent finished without any text to show)")
+		if status != nil {
+			b.sendAll(ctx, to, "(the agent finished without any text to show)")
+		}
 		return
 	}
-	b.send(ctx, to, final)
+	b.sendAll(ctx, to, final)
 }
 
 func (b *personalBridge) send(ctx context.Context, to jid.JID, text string) {
 	if _, err := b.api.SendText(ctx, to, text, ""); err != nil {
 		slog.Error("xmpp send failed", "to", to.String(), "err", err)
+	}
+}
+
+func (b *personalBridge) sendAll(ctx context.Context, to []jid.JID, text string) {
+	for _, j := range to {
+		b.send(ctx, j, text)
 	}
 }
 
@@ -554,7 +645,11 @@ func (b *personalBridge) newStatus(to jid.JID) *statusMessage {
 	return &statusMessage{api: b.api, to: to, minGap: b.correctionGap, now: b.now}
 }
 
+// A nil statusMessage is a turn nobody is watching: every method is a no-op.
 func (s *statusMessage) start(ctx context.Context) {
+	if s == nil {
+		return
+	}
 	id, err := s.api.SendText(ctx, s.to, "…", "")
 	if err != nil {
 		slog.Error("xmpp status create failed", "err", err)
@@ -565,12 +660,15 @@ func (s *statusMessage) start(ctx context.Context) {
 }
 
 func (s *statusMessage) append(ctx context.Context, line string) {
+	if s == nil {
+		return
+	}
 	s.lines = append(s.lines, line)
 	s.flush(ctx, false)
 }
 
 func (s *statusMessage) flush(ctx context.Context, force bool) {
-	if len(s.lines) == 0 {
+	if s == nil || len(s.lines) == 0 {
 		return
 	}
 	if !force && s.now().Sub(s.lastAt) < s.minGap {

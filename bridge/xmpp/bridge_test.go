@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"charm.land/fantasy"
 	"mellium.im/xmpp/jid"
@@ -123,6 +124,7 @@ func TestConfigValidation(t *testing.T) {
 		{"empty model", func(c *Config) { c.Model = "" }, "Model"},
 		{"no allowlist", func(c *Config) { c.AllowedJIDs = nil }, "allowed JID"},
 		{"invalid allowed account", func(c *Config) { c.AllowedJIDs = []string{"example.org"} }, "allowed JID"},
+		{"malformed schedule time", func(c *Config) { c.Schedule = Daily("digest", "07:30", "half seven") }, "half seven"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -234,6 +236,7 @@ func TestProgressCorrectsOneMessageAndFinalIsSeparate(t *testing.T) {
 }
 
 func TestDecodeMessageAcceptsOnlyDirectChatBodies(t *testing.T) {
+	now := time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name string
 		xml  string
@@ -243,7 +246,8 @@ func TestDecodeMessageAcceptsOnlyDirectChatBodies(t *testing.T) {
 		{"normal", `<message xmlns="jabber:client" from="owner@example.org/p" type="normal"><body>hello</body></message>`, false},
 		{"empty body", `<message xmlns="jabber:client" from="owner@example.org/p" type="chat"><body></body></message>`, false},
 		{"edited message", `<message xmlns="jabber:client" from="owner@example.org/p" type="chat"><body>changed</body><replace xmlns="urn:xmpp:message-correct:0" id="old"/></message>`, false},
-		{"offline message", `<message xmlns="jabber:client" from="owner@example.org/p" type="chat"><body>old task</body><delay xmlns="urn:xmpp:delay" from="example.org" stamp="2026-08-24T10:00:00Z"/></message>`, false},
+		{"a reply queued while the bridge restarted", `<message xmlns="jabber:client" from="owner@example.org/p" type="chat"><body>hello</body><delay xmlns="urn:xmpp:delay" from="example.org" stamp="2026-08-24T10:00:00Z"/></message>`, true},
+		{"a message older than a digest interval", `<message xmlns="jabber:client" from="owner@example.org/p" type="chat"><body>old task</body><delay xmlns="urn:xmpp:delay" from="example.org" stamp="2026-08-23T10:00:00Z"/></message>`, false},
 		{"presence", `<presence xmlns="jabber:client" from="owner@example.org/p"/>`, false},
 	}
 	for _, tc := range tests {
@@ -254,7 +258,7 @@ func TestDecodeMessageAcceptsOnlyDirectChatBodies(t *testing.T) {
 				t.Fatal(err)
 			}
 			start := tok.(xml.StartElement)
-			msg, ok, err := decodeMessage(d, &start)
+			msg, ok, err := decodeMessage(d, &start, now)
 			if err != nil {
 				t.Fatalf("decodeMessage() error = %v", err)
 			}
@@ -325,5 +329,263 @@ func TestFirstSandboxFailureIsReturned(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "no backend") {
 		t.Fatalf("newBridge() error = %v, want sandbox failure", err)
+	}
+}
+
+// gatedModel holds its first reply until the gate opens, so a test can make a
+// slot come due while a typed turn is still running.
+type gatedModel struct {
+	gate chan struct{}
+
+	mu      sync.Mutex
+	prompts []string
+}
+
+func (m *gatedModel) Generate(_ context.Context, req model.ModelRequest) (fantasy.Message, fantasy.Usage, error) {
+	last := req.Messages[len(req.Messages)-1]
+	m.mu.Lock()
+	first := len(m.prompts) == 0
+	m.prompts = append(m.prompts, model.TextParts(&last)[0].Text)
+	m.mu.Unlock()
+	if first {
+		<-m.gate
+	}
+	return asstText("done"), fantasy.Usage{}, nil
+}
+
+type fakeTimer struct {
+	waits chan time.Duration
+	fires chan time.Time
+}
+
+func newFakeTimer() *fakeTimer {
+	return &fakeTimer{waits: make(chan time.Duration, 8), fires: make(chan time.Time, 1)}
+}
+
+func (f *fakeTimer) after(d time.Duration) <-chan time.Time {
+	f.waits <- d
+	return f.fires
+}
+
+// serving runs the bridge's loop with a replaceable timer, and returns the
+// timer, the incoming queue, and a wait that stops the loop.
+func serving(t *testing.T, b *personalBridge) (*fakeTimer, *messageQueue, func()) {
+	t.Helper()
+	timer := newFakeTimer()
+	b.after = timer.after
+	queue := newMessageQueue()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- b.serve(ctx, queue, make(chan error, 1)) }()
+	return timer, queue, func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("serve did not return after cancellation")
+		}
+	}
+}
+
+// awaitSlot waits for the loop to ask how long until the next slot, which is
+// also how a test knows the turn before it finished.
+func (f *fakeTimer) awaitSlot(t *testing.T) time.Duration {
+	t.Helper()
+	select {
+	case d := <-f.waits:
+		return d
+	case <-time.After(2 * time.Second):
+		t.Fatal("the loop never waited for a slot")
+		return 0
+	}
+}
+
+func newScheduledBridge(t *testing.T, m model.ModelClient, s Schedule, allowed ...string) (*personalBridge, *fakeAPI) {
+	t.Helper()
+	b, api := newTestBridge(t, m, allowed...)
+	b.schedule = s
+	return b, api
+}
+
+func TestScheduledSlotRunsThePromptAndAnswersTheBareJID(t *testing.T) {
+	m := &testutils.ScriptedModel{Replies: []fantasy.Message{asstText("two new episodes")}}
+	b, api := newScheduledBridge(t, m, Daily("what is new?", "07:30"), "owner@example.org/laptop")
+
+	timer, _, stop := serving(t, b)
+	timer.awaitSlot(t)
+	timer.fires <- time.Now()
+	timer.awaitSlot(t)
+	stop()
+
+	if len(m.Calls) != 1 {
+		t.Fatalf("model calls = %d, want the schedule's prompt to have run once", len(m.Calls))
+	}
+	msgs := api.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("sent %d messages, want only the digest: %#v", len(msgs), msgs)
+	}
+	if got := msgs[0].text; got != "two new episodes" {
+		t.Errorf("digest = %q, want %q", got, "two new episodes")
+	}
+	if got := msgs[0].to.String(); got != "owner@example.org" {
+		t.Errorf("digest went to %q, want the bare allowed JID", got)
+	}
+}
+
+func TestScheduledTurnShowsNoProgressTrail(t *testing.T) {
+	m := &testutils.ScriptedModel{Replies: []fantasy.Message{
+		asstToolCall("bash", `{"cmd":"ls"}`),
+		asstText("all quiet, one change"),
+	}}
+	b, api := newScheduledBridge(t, m, Daily("what is new?", "07:30"))
+
+	timer, _, stop := serving(t, b)
+	timer.awaitSlot(t)
+	timer.fires <- time.Now()
+	timer.awaitSlot(t)
+	stop()
+
+	msgs := api.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("sent %d messages, want exactly the answer: %#v", len(msgs), msgs)
+	}
+	if msgs[0].replaceID != "" {
+		t.Errorf("scheduled answer corrected %q, want a plain message", msgs[0].replaceID)
+	}
+}
+
+func TestScheduledTurnWithNothingToSaySendsNothing(t *testing.T) {
+	m := &testutils.ScriptedModel{Replies: []fantasy.Message{asstText("")}}
+	b, api := newScheduledBridge(t, m, Daily("what is new?", "07:30"))
+
+	timer, _, stop := serving(t, b)
+	timer.awaitSlot(t)
+	timer.fires <- time.Now()
+	timer.awaitSlot(t)
+	stop()
+
+	if msgs := api.messages(); len(msgs) != 0 {
+		t.Fatalf("silent run sent %#v", msgs)
+	}
+}
+
+func TestScheduledRunStartsAFreshSessionInTheSameSandbox(t *testing.T) {
+	m := &testutils.ScriptedModel{Replies: []fantasy.Message{asstText("morning")}}
+	b, _ := newScheduledBridge(t, m, Daily("what is new?", "07:30"))
+	before, sandbox := b.current.ID, b.current.SandboxName()
+
+	timer, _, stop := serving(t, b)
+	timer.awaitSlot(t)
+	timer.fires <- time.Now()
+	timer.awaitSlot(t)
+	stop()
+
+	if b.current.ID == before {
+		t.Errorf("session id = %q, want a fresh session", b.current.ID)
+	}
+	if got := b.current.SandboxName(); got != sandbox {
+		t.Errorf("sandbox = %q, want the same %q", got, sandbox)
+	}
+	if got := len(b.current.Messages); got != 2 {
+		t.Errorf("transcript length = %d, want only the scheduled turn", got)
+	}
+}
+
+func TestContinuingScheduleKeepsTheSession(t *testing.T) {
+	m := &testutils.ScriptedModel{Replies: []fantasy.Message{asstText("hi"), asstText("morning")}}
+	b, _ := newScheduledBridge(t, m, Daily("what is new?", "07:30").Continuing())
+	b.handleMessage(context.Background(), incoming("owner@example.org/phone", "hi"))
+	before := b.current.ID
+
+	timer, _, stop := serving(t, b)
+	timer.awaitSlot(t)
+	timer.fires <- time.Now()
+	timer.awaitSlot(t)
+	stop()
+
+	if b.current.ID != before {
+		t.Errorf("session id = %q, want the same %q", b.current.ID, before)
+	}
+	if got := len(b.current.Messages); got != 4 {
+		t.Errorf("transcript length = %d, want both turns", got)
+	}
+}
+
+func TestScheduledTurnWaitsForTheTypedOneInFlight(t *testing.T) {
+	m := &gatedModel{gate: make(chan struct{})}
+	b, api := newScheduledBridge(t, m, Daily("what is new?", "07:30"))
+
+	timer, queue, stop := serving(t, b)
+	timer.awaitSlot(t)
+	queue.push(incoming("owner@example.org/phone", "review this"))
+	timer.fires <- time.Now() // comes due while the typed turn is blocked
+	close(m.gate)
+	timer.awaitSlot(t)
+	timer.awaitSlot(t)
+	stop()
+
+	m.mu.Lock()
+	prompts := append([]string(nil), m.prompts...)
+	m.mu.Unlock()
+	if len(prompts) != 2 || prompts[0] != "review this" || prompts[1] != "what is new?" {
+		t.Fatalf("prompts = %#v, want the typed turn then the scheduled one", prompts)
+	}
+	msgs := api.messages()
+	if len(msgs) < 2 {
+		t.Fatalf("sent %#v, want the typed turn's trail and the digest", msgs)
+	}
+	if got := msgs[len(msgs)-1].text; got != "done" || msgs[len(msgs)-1].replaceID != "" {
+		t.Fatalf("last message = %#v, want the scheduled answer after the typed turn", msgs[len(msgs)-1])
+	}
+}
+
+func TestNoScheduleNeverWaitsForASlot(t *testing.T) {
+	m := &testutils.ScriptedModel{Replies: []fantasy.Message{asstText("the answer")}}
+	b, api := newTestBridge(t, m)
+
+	timer, queue, stop := serving(t, b)
+	queue.push(incoming("owner@example.org/phone", "review this"))
+	waitFor(t, func() bool { return len(api.messages()) >= 2 })
+	stop()
+
+	select {
+	case d := <-timer.waits:
+		t.Fatalf("an empty schedule waited %s for a slot", d)
+	default:
+	}
+	if got := api.messages()[len(api.messages())-1].text; got != "the answer" {
+		t.Errorf("final reply = %q, want the typed answer", got)
+	}
+}
+
+func waitFor(t *testing.T, done func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if done() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("timed out waiting for the bridge")
+}
+
+func TestHelpMentionsTheSchedule(t *testing.T) {
+	m := &testutils.ScriptedModel{}
+	b, api := newScheduledBridge(t, m, Daily("what is new?", "07:30", "18:30"))
+
+	b.handleMessage(context.Background(), incoming("owner@example.org/phone", "/help"))
+
+	help := api.messages()[0].text
+	for _, want := range []string{"07:30", "18:30"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("/help = %q, want it to name the slot %q", help, want)
+		}
+	}
+
+	quiet, quietAPI := newTestBridge(t, m)
+	quiet.handleMessage(context.Background(), incoming("owner@example.org/phone", "/help"))
+	if got := quietAPI.messages()[0].text; strings.Contains(got, "on my own") {
+		t.Errorf("/help without a schedule = %q, want no mention of one", got)
 	}
 }

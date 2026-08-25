@@ -29,6 +29,7 @@ agentdb/turso/            embedded Turso agent database: sessions as rows, one
                           row per message, the agent's notes, and the schema
                           migrations
 bridge/telegram/          personal Telegram long-polling bridge
+bridge/xmpp/              personal XMPP bridge, including its own scheduled turns
 model/                    model client abstractions and fantasy adapter
 sandbox/                  sandbox lifecycle manager and the local backend
 sandbox/docker/           Docker backend: one long-lived container per sandbox
