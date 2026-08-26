@@ -78,6 +78,9 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := store.Append(context.Background(), "taste", "Deep dives."); err != nil {
 		t.Fatalf("Append() after a second Migrate error = %v", err)
 	}
+	if err := store.Put(context.Background(), "episode/12", []byte("first")); err != nil {
+		t.Fatalf("Put() after a second Migrate error = %v", err)
+	}
 }
 
 func appliedMigrations(t *testing.T, db *sql.DB) int {
@@ -123,12 +126,12 @@ func TestWithClockControlsUpdatedAt(t *testing.T) {
 	); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
-	infos, err := store.List(context.Background(), 1)
+	infos, err := store.ListSessions(context.Background(), 1)
 	if err != nil {
-		t.Fatalf("List() error = %v", err)
+		t.Fatalf("ListSessions() error = %v", err)
 	}
 	if len(infos) != 1 || !infos[0].UpdatedAt.Equal(want) {
-		t.Fatalf("List() = %#v, want updated time %v", infos, want)
+		t.Fatalf("ListSessions() = %#v, want updated time %v", infos, want)
 	}
 }
 

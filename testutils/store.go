@@ -55,8 +55,8 @@ func (s *MemStore) Load(ctx context.Context, id string) (*agent.Session, error) 
 	return stored.record.Session(), nil
 }
 
-// List returns the most recently saved sessions first.
-func (s *MemStore) List(ctx context.Context, limit int) ([]agent.SessionInfo, error) {
+// ListSessions returns the most recently saved sessions first.
+func (s *MemStore) ListSessions(ctx context.Context, limit int) ([]agent.SessionInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

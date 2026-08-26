@@ -3,6 +3,7 @@ package xmpp
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -37,6 +38,12 @@ func (s Schedule) Continuing() Schedule {
 	s.at = append([]string(nil), s.at...)
 	return s
 }
+
+// Times are the times of day this schedule runs at, and none at all when it
+// schedules nothing. Schedule holds a slice and so is not comparable; without
+// this an application could only ask whether its own flag parsing produced the
+// zero value, not whether it produced the right times.
+func (s Schedule) Times() []string { return slices.Clone(s.at) }
 
 func (s Schedule) zero() bool { return s.prompt == "" && len(s.at) == 0 }
 

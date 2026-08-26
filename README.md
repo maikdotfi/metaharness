@@ -4,6 +4,8 @@ Meta Harness allows building Agent Harnesses from pieces. It helps to run primar
 
 It is not meant to be useful without some coding, you have to write the agent itself in the end and deploy. That is part of the fun.
 
+An agent's database keeps its sessions and its notes, and lends the application a key-value table for whatever else it needs to remember.
+
 Meta harness is not executable by itself, see [examples](./examples) for how to assemble agents with it.
 
 See [STACK.md](./STACK.md) for the tech stack and [TOOLS.md](./TOOLS.md) for how tools are written and why the tool plumbing is shaped the way it is.

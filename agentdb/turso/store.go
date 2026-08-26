@@ -288,8 +288,8 @@ func (s *Store) loadMessages(ctx context.Context, id string) ([]fantasy.Message,
 	return messages, nil
 }
 
-// List returns the most recently saved sessions first.
-func (s *Store) List(ctx context.Context, limit int) ([]agent.SessionInfo, error) {
+// ListSessions returns the most recently saved sessions first.
+func (s *Store) ListSessions(ctx context.Context, limit int) ([]agent.SessionInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

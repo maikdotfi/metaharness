@@ -371,8 +371,14 @@ func (q *messageQueue) pop() (messageBody, bool) {
 func incomingHandler(ctx context.Context, incoming *messageQueue, now func() time.Time) mxmpp.Handler {
 	return mxmpp.HandlerFunc(func(t xmlstream.TokenReadEncoder, start *xml.StartElement) error {
 		msg, ok, err := decodeMessage(t, start, now())
-		if err != nil || !ok {
-			return err
+		if err != nil {
+			// One stanza the bridge cannot read is not a reason to drop the
+			// stream and stop answering; the next one may be fine.
+			slog.Warn("xmpp undecodable stanza ignored", "stanza", start.Name.Local, "err", err)
+			return nil
+		}
+		if !ok {
+			return nil
 		}
 		select {
 		case <-ctx.Done():
@@ -389,9 +395,11 @@ func decodeMessage(r xml.TokenReader, start *xml.StartElement, now time.Time) (m
 		(start.Name.Space != "" && start.Name.Space != stanza.NSClient) {
 		return messageBody{}, false, nil
 	}
+	// The stream hands a handler the stanza's tokens with the start element
+	// already read, so it goes back in front of them for the decoder.
 	var msg messageBody
-	err := xml.NewTokenDecoder(r).DecodeElement(&msg, start)
-	if err != nil && !errors.Is(err, io.EOF) {
+	d := xml.NewTokenDecoder(xmlstream.MultiReader(xmlstream.Token(*start), r))
+	if err := d.Decode(&msg); err != nil && !errors.Is(err, io.EOF) {
 		return messageBody{}, false, err
 	}
 	// A correction is the XMPP equivalent of an edited update. The original may

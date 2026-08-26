@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	"mellium.im/xmlstream"
 	"mellium.im/xmpp/jid"
 	"mellium.im/xmpp/stanza"
 
@@ -235,6 +236,22 @@ func TestProgressCorrectsOneMessageAndFinalIsSeparate(t *testing.T) {
 	}
 }
 
+// The stream hands a handler the stanza's own tokens: the start element is
+// already consumed, and the reader ends after the stanza's end element.
+func handlerTokens(t *testing.T, raw string) (xml.TokenReader, *xml.StartElement) {
+	t.Helper()
+	d := xml.NewDecoder(strings.NewReader(raw))
+	tok, err := d.Token()
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, ok := tok.(xml.StartElement)
+	if !ok {
+		t.Fatalf("first token = %T, want a start element", tok)
+	}
+	return xmlstream.InnerElement(d), &start
+}
+
 func TestDecodeMessageAcceptsOnlyDirectChatBodies(t *testing.T) {
 	now := time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
@@ -252,21 +269,22 @@ func TestDecodeMessageAcceptsOnlyDirectChatBodies(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			d := xml.NewDecoder(strings.NewReader(tc.xml))
-			tok, err := d.Token()
-			if err != nil {
-				t.Fatal(err)
-			}
-			start := tok.(xml.StartElement)
-			msg, ok, err := decodeMessage(d, &start, now)
+			r, start := handlerTokens(t, tc.xml)
+			msg, ok, err := decodeMessage(r, start, now)
 			if err != nil {
 				t.Fatalf("decodeMessage() error = %v", err)
 			}
 			if ok != tc.ok {
 				t.Fatalf("decodeMessage() ok = %v, want %v (msg %#v)", ok, tc.ok, msg)
 			}
-			if ok && msg.Body != "hello" {
+			if !ok {
+				return
+			}
+			if msg.Body != "hello" {
 				t.Errorf("body = %q, want hello", msg.Body)
+			}
+			if got := msg.From.String(); got != "owner@example.org/p" {
+				t.Errorf("from = %q, want owner@example.org/p", got)
 			}
 		})
 	}
@@ -587,5 +605,29 @@ func TestHelpMentionsTheSchedule(t *testing.T) {
 	quiet.handleMessage(context.Background(), incoming("owner@example.org/phone", "/help"))
 	if got := quietAPI.messages()[0].text; strings.Contains(got, "on my own") {
 		t.Errorf("/help without a schedule = %q, want no mention of one", got)
+	}
+}
+
+// readEncoder is the reader-plus-writer the stream hands a handler. The bridge
+// answers in a turn of its own, so nothing is ever written here.
+type readEncoder struct {
+	xml.TokenReader
+}
+
+func (readEncoder) EncodeToken(xml.Token) error               { return nil }
+func (readEncoder) Encode(any) error                          { return nil }
+func (readEncoder) EncodeElement(any, xml.StartElement) error { return nil }
+
+func TestStreamSurvivesAStanzaItCannotDecode(t *testing.T) {
+	now := func() time.Time { return time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC) }
+	q := newMessageQueue()
+	r, start := handlerTokens(t, `<message xmlns="jabber:client" from="not a jid" type="chat"><body>hello</body></message>`)
+
+	err := incomingHandler(context.Background(), q, now).HandleXMPP(readEncoder{TokenReader: r}, start)
+	if err != nil {
+		t.Fatalf("handler returned %v: one undecodable stanza ended the stream", err)
+	}
+	if msg, ok := q.pop(); ok {
+		t.Fatalf("undecodable stanza was queued as a prompt: %#v", msg)
 	}
 }

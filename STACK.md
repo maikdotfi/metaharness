@@ -25,8 +25,10 @@
 
 ```
 agent/                    agent loop, sessions, store interface, tool plumbing
+agentdb/                  what an agent database is, whichever one is chosen
 agentdb/turso/            embedded Turso agent database: sessions as rows, one
-                          row per message, the agent's notes, and the schema
+                          row per message, the agent's notes, a key-value table
+                          for the application's own state, and the schema
                           migrations
 bridge/telegram/          personal Telegram long-polling bridge
 bridge/xmpp/              personal XMPP bridge, including its own scheduled turns
@@ -69,6 +71,11 @@ links no database driver at all. A store implements the narrow
 Memory is that choice made again for what outlives a session:
 `agent.WithMemory(memory.SystemPrompt(store))` renders the agent's notes into its
 system prompt and gives the model one tool to write them.
+
+An application's own durable state is the third: a store is also an `agentdb.KV`
+— opaque keys, opaque values, ordered prefix listing — so an application's tools
+can keep what they track without defining a table in a database they did not
+create.
 
 ## Logging
 

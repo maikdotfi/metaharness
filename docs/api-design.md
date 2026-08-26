@@ -295,6 +295,15 @@ doing work the library should do.
   four, and the transport is chosen by which constructor was called rather than
   by a string — but a caller reading the option list still cannot tell which half
   applies to them.
+- **One store type implements every database interface, in one flat method
+  namespace.** `agentdb.KV` gave `*turso.Store` a `List(ctx, prefix)` next to the
+  session `List(ctx, limit)`, and the collision was resolved by renaming the
+  session one to `SessionLister.ListSessions` — invisible to applications, which
+  reach it through `Sessions.List`. The next collision is already spellable: a
+  session `Delete` would land on `KV.Delete`. The alternative, a `Store.KV()`
+  facet, was rejected because it makes the application name a facet where
+  `memory.SystemPrompt(store)` names none — but it is the fix if a third
+  collision arrives.
 - **`sandbox.WithImage` on a local manager does nothing.** One option vocabulary
   serving every backend is the acknowledged price of choosing a backend by name
   (`sandbox/registry.go:17`), but it is a price, and a caller reading the flag

@@ -39,7 +39,7 @@ type storedSessions struct {
 }
 
 func (s storedSessions) List(ctx context.Context, limit int) ([]SessionInfo, error) {
-	return s.lister.List(ctx, limit)
+	return s.lister.ListSessions(ctx, limit)
 }
 
 // Resume loads the session, opens the sandbox it recorded and binds the two, so

@@ -218,18 +218,18 @@ func RunSessionStoreSuite(t *testing.T, newStore SessionStoreFactory) {
 			t.Fatalf("Save(newer) error = %v", err)
 		}
 
-		got, err := lister.List(context.Background(), 1)
+		got, err := lister.ListSessions(context.Background(), 1)
 		if err != nil {
-			t.Fatalf("List() error = %v", err)
+			t.Fatalf("ListSessions() error = %v", err)
 		}
 		if len(got) != 1 {
-			t.Fatalf("List() returned %d items, want 1", len(got))
+			t.Fatalf("ListSessions() returned %d items, want 1", len(got))
 		}
 		want := newer
 		if got[0].ID != want.ID || got[0].Model != want.Model ||
 			got[0].Status != want.Status || got[0].Messages != len(want.Messages) ||
 			!reflect.DeepEqual(got[0].Usage, want.Usage) || got[0].UpdatedAt.IsZero() {
-			t.Fatalf("List()[0] = %#v, want metadata for %#v", got[0], want)
+			t.Fatalf("ListSessions()[0] = %#v, want metadata for %#v", got[0], want)
 		}
 	})
 }

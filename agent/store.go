@@ -18,7 +18,7 @@ type SessionStore interface {
 // SessionLister is an optional store capability for discovering resumable
 // sessions.
 type SessionLister interface {
-	List(ctx context.Context, limit int) ([]SessionInfo, error)
+	ListSessions(ctx context.Context, limit int) ([]SessionInfo, error)
 }
 
 // SessionInfo is the summary needed to choose a session without loading its

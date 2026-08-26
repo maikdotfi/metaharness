@@ -77,6 +77,20 @@ var migrations = []migration{
 			)`,
 		},
 	},
+	{
+		// A place for an application's own state, so nothing outside this
+		// package writes DDL into the file. Keys and values are opaque, and the
+		// primary key is what the prefix scan walks.
+		version: 3,
+		statements: []string{
+			`CREATE TABLE agent_kv (
+				key        TEXT PRIMARY KEY,
+				value      BLOB NOT NULL,
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL
+			)`,
+		},
+	},
 }
 
 // Migrate applies all pending schema migrations in version order.
