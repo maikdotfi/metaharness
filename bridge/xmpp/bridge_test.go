@@ -608,26 +608,116 @@ func TestHelpMentionsTheSchedule(t *testing.T) {
 	}
 }
 
-// readEncoder is the reader-plus-writer the stream hands a handler. The bridge
-// answers in a turn of its own, so nothing is ever written here.
-type readEncoder struct {
+// encoderStub is the reader-plus-writer the stream hands a handler. It records
+// the stanzas the handler answers with, in place of the real stream.
+type encoderStub struct {
 	xml.TokenReader
+	encoded []any
 }
 
-func (readEncoder) EncodeToken(xml.Token) error               { return nil }
-func (readEncoder) Encode(any) error                          { return nil }
-func (readEncoder) EncodeElement(any, xml.StartElement) error { return nil }
+func (*encoderStub) EncodeToken(xml.Token) error { return nil }
+
+func (e *encoderStub) Encode(v any) error { e.encoded = append(e.encoded, v); return nil }
+
+func (e *encoderStub) EncodeElement(v any, _ xml.StartElement) error { return e.Encode(v) }
 
 func TestStreamSurvivesAStanzaItCannotDecode(t *testing.T) {
 	now := func() time.Time { return time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC) }
 	q := newMessageQueue()
 	r, start := handlerTokens(t, `<message xmlns="jabber:client" from="not a jid" type="chat"><body>hello</body></message>`)
 
-	err := incomingHandler(context.Background(), q, now).HandleXMPP(readEncoder{TokenReader: r}, start)
+	b, _ := newTestBridge(t, &testutils.ScriptedModel{})
+	b.now = now
+	err := b.incomingHandler(context.Background(), q).HandleXMPP(&encoderStub{TokenReader: r}, start)
 	if err != nil {
 		t.Fatalf("handler returned %v: one undecodable stanza ended the stream", err)
 	}
 	if msg, ok := q.pop(); ok {
 		t.Fatalf("undecodable stanza was queued as a prompt: %#v", msg)
+	}
+}
+
+func TestAnnouncedPresenceSaysTheServiceIsRunning(t *testing.T) {
+	b, _ := newTestBridge(t, &testutils.ScriptedModel{})
+
+	out, err := xml.Marshal(b.availablePresence())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+	if strings.Contains(got, "type=") {
+		t.Errorf("presence %q has a type: availability is the empty one", got)
+	}
+	for _, unwanted := range []string{`to=""`, `from=""`} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("presence %q carries %s: a broadcast is addressed to nobody", got, unwanted)
+		}
+	}
+	if !strings.Contains(got, "<status>") || strings.Contains(got, "<status></status>") {
+		t.Errorf("presence %q carries no status line saying the service is running", got)
+	}
+}
+
+func TestSubscriptionRequestsAreAnsweredByTheAllowlist(t *testing.T) {
+	tests := []struct {
+		name    string
+		xmlText string
+		want    stanza.PresenceType
+		to      string
+	}{
+		{
+			"a request from an allowed account",
+			`<presence xmlns="jabber:client" from="owner@example.org/phone" type="subscribe"/>`,
+			stanza.SubscribedPresence, "owner@example.org",
+		},
+		{
+			"a request from a stranger",
+			`<presence xmlns="jabber:client" from="spam@elsewhere.org/x" type="subscribe"/>`,
+			stanza.UnsubscribedPresence, "spam@elsewhere.org",
+		},
+		{
+			"a contact coming online",
+			`<presence xmlns="jabber:client" from="owner@example.org/phone"/>`,
+			"", "",
+		},
+		{
+			"a contact unsubscribing",
+			`<presence xmlns="jabber:client" from="owner@example.org/phone" type="unsubscribe"/>`,
+			"", "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			b, _ := newTestBridge(t, &testutils.ScriptedModel{})
+			q := newMessageQueue()
+			r, start := handlerTokens(t, tc.xmlText)
+			enc := &encoderStub{TokenReader: r}
+
+			if err := b.incomingHandler(context.Background(), q).HandleXMPP(enc, start); err != nil {
+				t.Fatalf("handler returned %v", err)
+			}
+			if msg, ok := q.pop(); ok {
+				t.Fatalf("presence was queued as a prompt: %#v", msg)
+			}
+			if tc.to == "" {
+				if len(enc.encoded) != 0 {
+					t.Fatalf("bridge answered with %#v, want silence", enc.encoded)
+				}
+				return
+			}
+			if len(enc.encoded) != 1 {
+				t.Fatalf("bridge sent %d stanzas, want one answer", len(enc.encoded))
+			}
+			reply, ok := enc.encoded[0].(presenceBody)
+			if !ok {
+				t.Fatalf("answer = %#v, want a presence", enc.encoded[0])
+			}
+			if reply.Type != tc.want {
+				t.Errorf("answer type = %q, want %q", reply.Type, tc.want)
+			}
+			if got := reply.To.String(); got != tc.to {
+				t.Errorf("answer to = %q, want the bare %q", got, tc.to)
+			}
+		})
 	}
 }

@@ -150,6 +150,53 @@ type messageBody struct {
 	Delay   *stanza.Delay `xml:"urn:xmpp:delay delay,omitempty"`
 }
 
+// presenceBody is the presence the bridge broadcasts. The status line is what a
+// client shows next to the account, so a running service is visible without
+// asking it anything.
+type presenceBody struct {
+	stanza.Presence
+	Status string `xml:"status,omitempty"`
+}
+
+// availablePresence announces the running service. Availability is the empty
+// presence type, so the stanza carries no type at all.
+func (b *personalBridge) availablePresence() presenceBody {
+	return presenceBody{
+		Presence: stanza.Presence{ID: newMessageID()},
+		Status:   "on duty — send me a message",
+	}
+}
+
+// MarshalXML writes the presence through the stanza package, which leaves out
+// the addresses a broadcast does not have.
+func (p presenceBody) MarshalXML(e *xml.Encoder, _ xml.StartElement) error {
+	var payload xml.TokenReader
+	if p.Status != "" {
+		payload = xmlstream.Wrap(
+			xmlstream.Token(xml.CharData(p.Status)),
+			xml.StartElement{Name: xml.Name{Local: "status"}},
+		)
+	}
+	_, err := xmlstream.Copy(e, p.Presence.Wrap(payload))
+	return err
+}
+
+// presenceReply answers an inbound presence stanza, or reports that there is
+// nothing to answer. A subscription request from an allowed account is granted
+// so their client can see the service running; anyone else is refused, which
+// also keeps the agent off a stranger's contact list.
+func (b *personalBridge) presenceReply(p stanza.Presence) (presenceBody, bool) {
+	if p.Type != stanza.SubscribePresence {
+		return presenceBody{}, false
+	}
+	from := p.From.Bare()
+	reply := stanza.Presence{ID: newMessageID(), To: from, Type: stanza.UnsubscribedPresence}
+	if b.allowed[from.String()] {
+		reply.Type = stanza.SubscribedPresence
+	}
+	return presenceBody{Presence: reply}, true
+}
+
 func (a sessionAPI) SendText(ctx context.Context, to jid.JID, text, replaceID string) (string, error) {
 	id := newMessageID()
 	msg := messageBody{
@@ -276,14 +323,14 @@ func Run(ctx context.Context, cfg Config) error {
 	defer s.Close()
 	b.api = sessionAPI{session: s}
 
-	if err := s.Send(ctx, stanza.Presence{Type: stanza.AvailablePresence}.Wrap(nil)); err != nil {
+	if err := s.Encode(ctx, b.availablePresence()); err != nil {
 		return fmt.Errorf("xmpp: sending initial presence: %w", err)
 	}
 
 	incoming := newMessageQueue()
 	serveDone := make(chan error, 1)
 	go func() {
-		serveDone <- s.Serve(incomingHandler(ctx, incoming, b.now))
+		serveDone <- s.Serve(b.incomingHandler(ctx, incoming))
 	}()
 
 	slog.Info("xmpp bridge started",
@@ -368,9 +415,19 @@ func (q *messageQueue) pop() (messageBody, bool) {
 	return msg, true
 }
 
-func incomingHandler(ctx context.Context, incoming *messageQueue, now func() time.Time) mxmpp.Handler {
+func (b *personalBridge) incomingHandler(ctx context.Context, incoming *messageQueue) mxmpp.Handler {
 	return mxmpp.HandlerFunc(func(t xmlstream.TokenReadEncoder, start *xml.StartElement) error {
-		msg, ok, err := decodeMessage(t, start, now())
+		if p, ok := decodePresence(start); ok {
+			reply, ok := b.presenceReply(p)
+			if !ok {
+				return nil
+			}
+			if err := t.Encode(reply); err != nil {
+				slog.Warn("xmpp subscription answer failed", "to", reply.To.String(), "err", err)
+			}
+			return nil
+		}
+		msg, ok, err := decodeMessage(t, start, b.now())
 		if err != nil {
 			// One stanza the bridge cannot read is not a reason to drop the
 			// stream and stop answering; the next one may be fine.
@@ -388,6 +445,21 @@ func incomingHandler(ctx context.Context, incoming *messageQueue, now func() tim
 		incoming.push(msg)
 		return nil
 	})
+}
+
+// decodePresence reads the attributes of an inbound presence stanza. Its
+// payload holds nothing the bridge acts on, so it is left unread.
+func decodePresence(start *xml.StartElement) (stanza.Presence, bool) {
+	if start.Name.Local != "presence" ||
+		(start.Name.Space != "" && start.Name.Space != stanza.NSClient) {
+		return stanza.Presence{}, false
+	}
+	p, err := stanza.NewPresence(*start)
+	if err != nil {
+		slog.Warn("xmpp undecodable presence ignored", "err", err)
+		return stanza.Presence{}, false
+	}
+	return p, true
 }
 
 func decodeMessage(r xml.TokenReader, start *xml.StartElement, now time.Time) (messageBody, bool, error) {
